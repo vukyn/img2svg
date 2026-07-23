@@ -4,7 +4,7 @@ Trace a raster image (Pokémon art, icons, logos) into scalable vector **SVG**. 
 
 Two layers:
 - **python CLI** (`cli/img2svg.py`) — the tracing engine, wraps [vtracer](https://github.com/visioncortex/vtracer) (Rust) color tracing.
-- **Go service** (`cmd/server`) — Fiber HTTP server that serves a web UI and a `POST /api/trace` endpoint; it shells out to the CLI via `os/exec` (image bytes in via stdin, SVG out via stdout — no temp files).
+- **Go service** (`cmd/server`) — Fiber HTTP server that serves a **React UI** (Vite + TypeScript, embedded via `go:embed`) and a `POST /api/trace` endpoint; it shells out to the CLI via `os/exec` (image bytes in via stdin, SVG out via stdout — no temp files).
 
 ```
 img2svg/
@@ -14,7 +14,8 @@ img2svg/
   cmd/server/main.go  # Fiber HTTP service
   internal/
     tracer/           # os/exec wrapper around the CLI
-    web/              # go:embed static UI (upload · log · output)
+    web/              # go:embed the built UI (internal/web/dist)
+  ui/                 # React 19 + Vite 7 + TypeScript frontend (source)
 ```
 
 ## Setup
@@ -26,11 +27,24 @@ make deps       # go mod tidy
 
 ## Run the service
 
+The UI is a React app that is **built and embedded** into the Go binary via
+`go:embed`. `make build-web` MUST run before `go build` — it produces the
+embedded assets in `internal/web/dist` (never committed; only a `.gitkeep`
+placeholder is).
+
 ```bash
-make run                        # http://localhost:8090
+make build-web                  # build the UI → internal/web/dist
+make run                        # http://localhost:8090 (serves the embedded UI)
+# or, for local frontend work:
+make web                        # Vite dev server (HMR), proxies /api → :8090
 ```
 
-Web UI: drop an image → pick quality → **Trace → SVG**. Shows a live log and the rendered output with a download button.
+`make dev` runs `build-web` then `run` in one shot. `make build` builds the UI
+then the server binary into `bin/`.
+
+Web UI: drop / click / paste (⌘V) an image → pick quality, resize, transparent
+background → **Trace → SVG**. Shows a live log, stat cards, a raster↔SVG compare
+slider, a zoom/pan fullscreen lightbox, and copy/download of the SVG.
 
 ### Config (env)
 
