@@ -58,6 +58,7 @@
   /* fullscreen lightbox */
   #lightbox { position: fixed; inset: 0; background: rgba(6,10,14,.92); z-index: 50;
     display: flex; align-items: center; justify-content: center; padding: 32px; }
+  #lightbox[hidden] { display: none; }  /* beat the id-specificity display:flex above */
   #lightboxStage { background: #fff; border-radius: 10px; padding: 16px; max-width: 96vw; max-height: 92vh;
     overflow: auto; display: flex; align-items: center; justify-content: center; }
   #lightboxStage svg, #lightboxStage img { max-width: 92vw; max-height: 88vh; width: auto; height: auto; }
