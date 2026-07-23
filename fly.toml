@@ -1,0 +1,26 @@
+# fly.toml — img2svg (raster→SVG tracer)
+# Deploy:  fly launch --no-deploy   (once, to create the app / pick a name)
+#          fly deploy               (builds the Dockerfile: React UI + Go + vtracer)
+# See https://fly.io/docs/reference/configuration/
+
+app = 'img2svg'
+primary_region = 'sin'
+
+[build]
+  # uses ./Dockerfile (multi-stage: node UI → go build → python+vtracer runtime)
+
+[env]
+  PORT = '8090'
+
+[http_service]
+  internal_port = 8090
+  force_https = true
+  # scale-to-zero: tool is low-QPS, so let idle machines stop and cold-start on demand
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'  # vtracer on large images can spike past the 256mb default
