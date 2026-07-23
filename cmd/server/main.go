@@ -5,7 +5,6 @@ package main
 
 import (
 	"io"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -69,13 +68,10 @@ func main() {
 		return c.Send(svg)
 	})
 
-	// embedded web UI (index.html + assets under static/)
-	staticFS, err := fs.Sub(web.Static, "static")
-	if err != nil {
-		log.Fatal(err)
-	}
+	// embedded web UI: the built React bundle (index.html + assets/) produced by
+	// `make build-web`. SPA fallback serves index.html for unknown paths.
 	app.Use("/", filesystem.New(filesystem.Config{
-		Root:         http.FS(staticFS),
+		Root:         http.FS(web.FS()),
 		Index:        "index.html",
 		NotFoundFile: "index.html",
 	}))

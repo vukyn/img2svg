@@ -5,3 +5,13 @@ __pycache__/
 .venv/
 .env
 .code-review-graph/
+
+# React UI (Vite)
+ui/node_modules/
+ui/dist/
+*.tsbuildinfo
+
+# Go-embedded UI build output — the built bundle is never committed, only the
+# .gitkeep placeholder so a fresh checkout compiles the embed directive.
+internal/web/dist/*
+!internal/web/dist/.gitkeep

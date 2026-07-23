@@ -1,0 +1,852 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>img2svg — raster → vector tracer</title>
+<style>
+  /* ─────────────────────────────────────────────────────────────
+     DESIGN TOKENS — dark-mode-first developer-tool aesthetic.
+     Evolves the current teal accent (#4fb8a3) into a cohesive OLED
+     palette. All values chosen to map cleanly onto a token scale.
+     ───────────────────────────────────────────────────────────── */
+  :root {
+    /* surfaces */
+    --bg:        #0b0f14;
+    --bg-grad:   radial-gradient(1200px 600px at 78% -10%, #12303048 0%, transparent 60%),
+                 radial-gradient(900px 500px at 0% 0%, #10202c40 0%, transparent 55%);
+    --panel:     #12181f;
+    --panel-2:   #1a222c;
+    --panel-3:   #222d39;
+    --line:      #263140;
+    --line-2:    #34435560;
+    --inset:     #080b0f;   /* recessed wells: log, output stage */
+
+    /* text */
+    --fg:        #e8eef5;
+    --muted:     #93a2b5;
+    --faint:     #5f6f81;
+
+    /* brand + semantic */
+    --accent:    #46c9ac;
+    --accent-hi: #5fe0c1;
+    --accent-dim:#46c9ac22;
+    --accent-ink:#04231c;
+    --ok:        #5fd18b;
+    --err:       #f0685f;
+    --warn:      #e6b155;
+    --info:      #6ec6f2;
+    --err-bg:    #f0685f18;
+    --ok-bg:     #5fd18b16;
+
+    /* new-feature marker */
+    --new:       #b98bff;
+    --new-bg:    #b98bff1f;
+
+    /* shape */
+    --r-sm: 8px; --r-md: 11px; --r-lg: 14px; --r-xl: 18px;
+    --sh-1: 0 1px 2px #0006;
+    --sh-2: 0 8px 24px -8px #000a, 0 2px 6px #0006;
+    --glow: 0 0 0 1px #46c9ac30, 0 6px 22px -6px #46c9ac33;
+
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; font: 15px/1.55 var(--sans);
+    background: var(--bg); background-image: var(--bg-grad); background-attachment: fixed;
+    color: var(--fg); padding: 28px 20px 56px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1140px; margin: 0 auto; }
+
+  /* ── Header ───────────────────────────────────────────── */
+  header { display: flex; align-items: center; gap: 16px; margin-bottom: 26px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 42px; height: 42px; border-radius: var(--r-md); flex-shrink: 0;
+    display: grid; place-items: center;
+    background: linear-gradient(145deg, #1c2b30, #131a21);
+    border: 1px solid var(--line); box-shadow: var(--glow);
+  }
+  .logo svg { width: 24px; height: 24px; }
+  h1 { font-size: 21px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  h1 b { color: var(--accent); font-weight: 700; }
+  .tagline { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+  .head-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted);
+    background: var(--panel); border: 1px solid var(--line); padding: 6px 11px; border-radius: 999px;
+  }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .kbd {
+    font: 11px/1 var(--mono); color: var(--muted); background: var(--panel-2);
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; padding: 4px 6px;
+  }
+
+  /* mock-only state switcher (annotate: NOT part of the real UI) */
+  .mockbar {
+    display: flex; align-items: center; gap: 8px; margin: 0 0 20px;
+    padding: 10px 14px; border: 1px dashed var(--line-2); border-radius: var(--r-md);
+    background: #b98bff0d; font-size: 12px; color: var(--muted); flex-wrap: wrap;
+  }
+  .mockbar b { color: var(--new); }
+  .mockbar .segmented { margin-left: auto; }
+
+  /* ── Layout grid ──────────────────────────────────────── */
+  .grid { display: grid; grid-template-columns: 400px 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: linear-gradient(180deg, #141b23, #11171e);
+    border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--sh-1);
+  }
+  .panel-head {
+    display: flex; align-items: center; gap: 10px; padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .panel-head .step {
+    width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center;
+    font: 700 12px var(--mono); color: var(--accent); background: var(--accent-dim); border: 1px solid #46c9ac33;
+  }
+  .panel-head h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 0; font-weight: 600; }
+  .panel-head .spacer { margin-left: auto; }
+  .panel-body { padding: 16px; }
+
+  /* ── Buttons ──────────────────────────────────────────── */
+  button { font: inherit; cursor: pointer; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500;
+    border-radius: var(--r-sm); border: 1px solid var(--line); padding: 8px 13px;
+    background: var(--panel-2); color: var(--fg); transition: .16s ease;
+  }
+  .btn svg { width: 15px; height: 15px; }
+  .btn:hover { border-color: var(--line-2); background: var(--panel-3); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn.ghost { background: transparent; color: var(--muted); border-color: transparent; padding: 6px 9px; }
+  .btn.ghost:hover { color: var(--fg); background: var(--panel-2); }
+  .btn.sm { font-size: 12px; padding: 6px 10px; }
+  .btn.primary {
+    background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+    color: var(--accent-ink); border: none; font-weight: 600; box-shadow: var(--glow);
+  }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.primary:disabled { opacity: .45; cursor: not-allowed; filter: none; box-shadow: none; }
+  .btn.block { width: 100%; justify-content: center; padding: 12px; font-size: 14px; }
+
+  /* ── Drop zone ────────────────────────────────────────── */
+  .drop {
+    position: relative; border: 1.5px dashed var(--line-2); border-radius: var(--r-md);
+    padding: 30px 18px; text-align: center; cursor: pointer; transition: .18s ease;
+    background: #0e141a; color: var(--muted);
+  }
+  .drop:hover { border-color: #46c9ac66; background: #0f1720; }
+  .drop.hot { border-color: var(--accent); background: var(--accent-dim); color: var(--fg); box-shadow: inset 0 0 0 1px #46c9ac33; }
+  .drop .cloud { width: 40px; height: 40px; margin: 0 auto 10px; color: var(--faint); transition: .18s; }
+  .drop:hover .cloud, .drop.hot .cloud { color: var(--accent); }
+  .drop .big { color: var(--fg); font-weight: 500; font-size: 14px; }
+  .drop .formats { display: inline-flex; gap: 5px; margin-top: 12px; flex-wrap: wrap; justify-content: center; }
+  .drop .formats span { font: 10px/1 var(--mono); text-transform: uppercase; letter-spacing: .04em;
+    color: var(--faint); border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; }
+
+  /* file preview card (after pick) */
+  .preview { display: flex; gap: 13px; align-items: center; text-align: left; }
+  .preview .thumb {
+    width: 68px; height: 68px; border-radius: var(--r-sm); flex-shrink: 0; object-fit: contain;
+    background: var(--panel-2); border: 1px solid var(--line);
+  }
+  .preview .meta-name { color: var(--fg); font-weight: 500; font-size: 14px; word-break: break-all; }
+  .preview .meta-sub { color: var(--muted); font-size: 12px; margin-top: 3px; font-family: var(--mono); }
+  .preview .swap { margin-top: 8px; }
+
+  /* ── Options / form controls ──────────────────────────── */
+  .field { margin-top: 18px; }
+  .field:first-child { margin-top: 0; }
+  .field > label.title { display: block; font-size: 12px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+
+  /* segmented control (quality / resize mode / mock state) */
+  .segmented { display: inline-flex; background: var(--inset); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 3px; gap: 3px; }
+  .segmented.full { display: flex; }
+  .segmented button {
+    flex: 1; border: none; background: transparent; color: var(--muted); font-size: 13px;
+    padding: 7px 12px; border-radius: 6px; transition: .15s ease; white-space: nowrap;
+  }
+  .segmented button:hover { color: var(--fg); }
+  .segmented button[aria-pressed="true"] { background: var(--panel-3); color: var(--fg); box-shadow: var(--sh-1); }
+  .segmented button .sub { display: block; font-size: 10px; color: var(--faint); font-weight: 400; margin-top: 1px; }
+  .segmented button[aria-pressed="true"] .sub { color: var(--muted); }
+
+  /* dimension inputs with aspect lock */
+  .dims { display: flex; align-items: center; gap: 10px; }
+  .num {
+    font: inherit; width: 96px; padding: 9px 11px; border-radius: var(--r-sm);
+    border: 1px solid var(--line); background: var(--inset); color: var(--fg); font-family: var(--mono);
+  }
+  .num:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+  .num.wide { width: 84px; }
+  .times { color: var(--faint); }
+  .lock {
+    display: grid; place-items: center; width: 34px; height: 34px; border-radius: var(--r-sm);
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); transition: .15s;
+  }
+  .lock[aria-pressed="true"] { color: var(--accent); border-color: #46c9ac55; background: var(--accent-dim); }
+  .lock svg { width: 15px; height: 15px; }
+  .unit { color: var(--muted); font-family: var(--mono); font-size: 13px; }
+  .resolved { color: var(--accent); font-family: var(--mono); font-size: 12px; margin-left: 2px; }
+
+  /* toggle switch (transparent background) */
+  .switch-row { display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--line);
+    border-radius: var(--r-sm); background: var(--panel); }
+  .switch-row .checker-mini { width: 34px; height: 34px; border-radius: 7px; flex-shrink: 0; border: 1px solid var(--line); }
+  .switch-row .st { flex: 1; }
+  .switch-row .st .lbl { font-size: 13px; font-weight: 500; }
+  .switch-row .st .desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .switch {
+    position: relative; width: 42px; height: 24px; border-radius: 999px; border: none;
+    background: var(--panel-3); transition: .18s; flex-shrink: 0;
+  }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px;
+    border-radius: 50%; background: var(--muted); transition: .18s; }
+  .switch[aria-pressed="true"] { background: var(--accent); }
+  .switch[aria-pressed="true"]::after { left: 21px; background: var(--accent-ink); }
+
+  .help { font-size: 12px; color: var(--faint); margin-top: 8px; line-height: 1.5; }
+
+  /* ── Output panel ─────────────────────────────────────── */
+  .checker {
+    background-color: #fbfbfb;
+    background-image:
+      linear-gradient(45deg, #d3d7db 25%, transparent 25%),
+      linear-gradient(-45deg, #d3d7db 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #d3d7db 75%),
+      linear-gradient(-45deg, transparent 75%, #d3d7db 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+  }
+  .stage {
+    position: relative; min-height: 340px; border-radius: var(--r-md); overflow: hidden;
+    display: flex; align-items: center; justify-content: center; border: 1px solid var(--line);
+  }
+  .stage svg, .stage img { max-width: 92%; max-height: 300px; width: auto; height: auto; display: block; }
+
+  /* empty state */
+  .empty-state { text-align: center; color: var(--faint); padding: 40px; }
+  .empty-state svg { width: 54px; height: 54px; margin-bottom: 12px; opacity: .7; }
+  .empty-state .t { color: var(--muted); font-size: 14px; font-weight: 500; }
+  .empty-state .s { font-size: 12px; margin-top: 4px; }
+
+  /* loading skeleton */
+  .loading-state { position: absolute; inset: 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px; background: #0e141aee; backdrop-filter: blur(2px); z-index: 3; }
+  .spinner { width: 40px; height: 40px; border: 3px solid var(--line); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-state .t { color: var(--fg); font-size: 14px; font-weight: 500; }
+  .loading-state .s { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .progress { width: 200px; height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .progress i { display: block; height: 100%; width: 40%; border-radius: 999px; background: var(--accent);
+    animation: indet 1.2s ease-in-out infinite; }
+  @keyframes indet { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+
+  /* error state */
+  .error-state { display: none; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 40px; gap: 12px; }
+  .error-state .ic { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center;
+    background: var(--err-bg); color: var(--err); }
+  .error-state .ic svg { width: 26px; height: 26px; }
+  .error-state .t { color: var(--fg); font-weight: 600; }
+  .error-state .code { font: 12px var(--mono); color: var(--err); background: var(--err-bg);
+    padding: 8px 12px; border-radius: 7px; max-width: 90%; word-break: break-word; }
+
+  /* compare slider (raster vs svg) — NEW */
+  .compare-wrap { position: absolute; inset: 0; display: none; }
+  .compare-wrap .layer { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+  .compare-wrap .raster { z-index: 1; }
+  .compare-wrap .vector { z-index: 2; overflow: hidden; }
+  .compare-wrap .raster img { image-rendering: pixelated; filter: saturate(1.05); }
+  .compare-handle { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--accent);
+    z-index: 4; cursor: ew-resize; box-shadow: 0 0 12px var(--accent); }
+  .compare-handle::before { content: ""; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: 34px; height: 34px; border-radius: 50%; background: var(--accent); box-shadow: var(--sh-2); }
+  .compare-handle svg { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: 20px; height: 20px; color: var(--accent-ink); z-index: 1; }
+  .compare-tag { position: absolute; top: 10px; font: 11px/1 var(--mono); text-transform: uppercase;
+    letter-spacing: .05em; padding: 5px 8px; border-radius: 6px; background: #0b0f14cc; color: var(--fg);
+    z-index: 5; pointer-events: none; }
+  .compare-tag.l { left: 10px; } .compare-tag.r { right: 10px; }
+
+  /* zoom hint pill inside stage */
+  .stage-hint { position: absolute; bottom: 10px; right: 10px; font: 11px var(--mono); color: var(--muted);
+    background: #0b0f14cc; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; z-index: 5; }
+
+  /* output toolbar */
+  .out-tools { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .out-tools .filename { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .out-tools .filename b { color: var(--fg); font-weight: 600; }
+  .out-tools .spacer { margin-left: auto; }
+
+  /* stat cards (visual surfacing of trace metrics) — NEW presentation */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 14px; }
+  @media (max-width: 560px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 11px 12px; }
+  .stat .k { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+  .stat .v { font: 600 16px var(--mono); color: var(--fg); margin-top: 4px; }
+  .stat .v small { font-size: 11px; color: var(--muted); font-weight: 400; }
+  .stat.good .v { color: var(--ok); }
+
+  /* ── Log terminal ─────────────────────────────────────── */
+  .log {
+    background: var(--inset); border: 1px solid var(--line); border-radius: var(--r-md);
+    font: 12px/1.6 var(--mono); padding: 14px 16px; height: 190px; overflow-y: auto;
+    color: var(--muted); white-space: pre-wrap; scrollbar-width: thin;
+  }
+  .log .line { display: block; }
+  .log .ts { color: var(--faint); }
+  .log .ok  { color: var(--ok); }
+  .log .err { color: var(--err); }
+  .log .info{ color: var(--info); }
+  .log .warn{ color: var(--warn); }
+  .log .metric { color: var(--fg); }
+  .log::-webkit-scrollbar { width: 8px; }
+  .log::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+
+  /* NEW tag marker */
+  .tag-new { display: inline-flex; align-items: center; font: 700 9px/1 var(--sans); letter-spacing: .08em;
+    text-transform: uppercase; color: var(--new); background: var(--new-bg); border: 1px solid #b98bff44;
+    border-radius: 5px; padding: 3px 5px; vertical-align: middle; }
+
+  /* ── Lightbox ─────────────────────────────────────────── */
+  .lightbox { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center;
+    background: #06090cf2; backdrop-filter: blur(6px); padding: 40px; }
+  .lightbox.open { display: flex; }
+  .lb-stage { position: relative; max-width: 94vw; max-height: 88vh; border-radius: var(--r-md); overflow: hidden;
+    cursor: grab; box-shadow: var(--sh-2); }
+  .lb-stage.grabbing { cursor: grabbing; }
+  .lb-canvas { transform-origin: center center; transition: transform .05s linear; }
+  .lb-stage svg, .lb-stage img { display: block; max-width: 94vw; max-height: 88vh; }
+  .lb-bar { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px;
+    align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 8px; }
+  .lb-bar .zoomval { font: 12px var(--mono); color: var(--muted); min-width: 46px; text-align: center; }
+  .lb-close { position: fixed; top: 18px; right: 22px; width: 40px; height: 40px; border-radius: 50%;
+    display: grid; place-items: center; background: var(--panel); color: var(--fg); border: 1px solid var(--line); }
+  .lb-close:hover { border-color: var(--accent); }
+  .lb-hint { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font: 12px var(--mono);
+    color: var(--faint); }
+  .icon-btn { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); }
+  .icon-btn:hover { border-color: var(--line-2); }
+  .icon-btn svg { width: 16px; height: 16px; }
+
+  .footnote { margin-top: 22px; font-size: 12px; color: var(--faint); text-align: center; }
+  .footnote .tag-new { margin-right: 6px; }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ── HEADER ─────────────────────────────────────────── -->
+  <header>
+    <div class="brand">
+      <div class="logo">
+        <!-- brand mark: raster grid dissolving into a vector node -->
+        <svg viewBox="0 0 24 24" fill="none">
+          <rect x="2" y="2" width="6" height="6" rx="1.2" fill="#46c9ac"/>
+          <rect x="9.5" y="2" width="6" height="6" rx="1.2" fill="#46c9ac" opacity=".5"/>
+          <rect x="2" y="9.5" width="6" height="6" rx="1.2" fill="#46c9ac" opacity=".5"/>
+          <path d="M16 15 L21 20 M21 15 L16 20" stroke="#5fe0c1" stroke-width="1.6" stroke-linecap="round"/>
+          <circle cx="16" cy="15" r="1.7" fill="#5fe0c1"/><circle cx="21" cy="20" r="1.7" fill="#5fe0c1"/>
+          <circle cx="21" cy="15" r="1.7" fill="#5fe0c1"/><circle cx="16" cy="20" r="1.7" fill="#5fe0c1"/>
+        </svg>
+      </div>
+      <div>
+        <h1>img2<b>svg</b></h1>
+        <p class="tagline">Trace raster art, icons &amp; logos into crisp, infinitely-scalable SVG.</p>
+      </div>
+    </div>
+    <div class="head-right">
+      <span class="badge"><span class="dot"></span>engine ready</span>
+      <span class="badge">python + vtracer</span>
+      <!-- NEW: keyboard hint. on real UI these fire the matching actions -->
+      <span class="badge" title="Keyboard shortcuts">
+        <span class="kbd">⌘V</span> paste &nbsp;·&nbsp; <span class="kbd">↵</span> trace
+      </span>
+    </div>
+  </header>
+
+  <!-- MOCK-ONLY CONTROL — not part of the real UI. Flip the output panel
+       between its real states so the reviewer can see each one. -->
+  <div class="mockbar">
+    <b>MOCK</b> preview state (this bar is not in the real app) —
+    <div class="segmented" id="mockState">
+      <button data-state="result" aria-pressed="true">Result</button>
+      <button data-state="compare" aria-pressed="false">Compare</button>
+      <button data-state="empty"  aria-pressed="false">Empty</button>
+      <button data-state="loading" aria-pressed="false">Loading</button>
+      <button data-state="error"  aria-pressed="false">Error</button>
+    </div>
+  </div>
+
+  <div class="grid">
+
+    <!-- ══ SOURCE + OPTIONS ══════════════════════════════ -->
+    <section class="panel">
+      <div class="panel-head">
+        <span class="step">1</span><h2>Source &amp; options</h2>
+      </div>
+      <div class="panel-body">
+
+        <!-- drop zone: empty variant -->
+        <div class="drop" id="drop">
+          <svg class="cloud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 13v8"/><path d="m8 17 4-4 4 4"/>
+            <path d="M20 16.5A4.5 4.5 0 0 0 17 8.2 6 6 0 0 0 5.2 9 4 4 0 0 0 5 17"/>
+          </svg>
+          <div class="big">Drop an image, or click to browse</div>
+          <!-- NEW: paste from clipboard also supported (⌘V) -->
+          <div style="font-size:12px;margin-top:4px">…or paste from clipboard</div>
+          <div class="formats">
+            <span>png</span><span>jpg</span><span>gif</span><span>bmp</span><span>webp</span>
+          </div>
+          <input type="file" id="file" accept="image/*" hidden>
+        </div>
+
+        <!-- drop zone: picked variant (shown by JS after pick / in mock by default) -->
+        <div class="drop preview" id="preview" style="cursor:default">
+          <div class="thumb checker" style="display:grid;place-items:center">
+            <!-- stand-in for the uploaded bitmap thumbnail -->
+            <svg viewBox="0 0 64 64" width="60" height="60">
+              <circle cx="32" cy="34" r="20" fill="#7cc36e"/>
+              <ellipse cx="32" cy="20" rx="15" ry="11" fill="#4f9b57"/>
+              <circle cx="25" cy="33" r="3.2" fill="#22301f"/><circle cx="39" cy="33" r="3.2" fill="#22301f"/>
+              <path d="M26 42 q6 5 12 0" stroke="#22301f" stroke-width="2" fill="none" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div>
+            <div class="meta-name">sprout-starter.png</div>
+            <div class="meta-sub">PNG · 512×512px · 84.2 KB</div>
+            <button class="btn ghost sm swap" id="swapBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></svg>
+              Replace
+            </button>
+          </div>
+        </div>
+
+        <!-- QUALITY — segmented control -->
+        <div class="field">
+          <label class="title">Quality</label>
+          <div class="segmented full" id="quality" role="group" aria-label="Quality preset">
+            <button data-q="faithful" aria-pressed="true">Faithful<span class="sub">exact · big</span></button>
+            <button data-q="balanced" aria-pressed="false">Balanced<span class="sub">general</span></button>
+            <button data-q="small" aria-pressed="false">Small<span class="sub">icons · ~5× smaller</span></button>
+          </div>
+        </div>
+
+        <!-- RESIZE — segmented mode + contextual controls -->
+        <div class="field">
+          <label class="title">Resize</label>
+          <div class="segmented full" id="resizeMode" role="group" aria-label="Resize mode">
+            <button data-m="none"  aria-pressed="true">Original</button>
+            <button data-m="ratio" aria-pressed="false">By ratio</button>
+            <button data-m="dims"  aria-pressed="false">By size</button>
+          </div>
+
+          <!-- ratio sub-controls -->
+          <div class="dims" id="ratioRow" style="margin-top:12px; display:none">
+            <input class="num wide" type="number" id="ratioPct" value="100" min="1" max="400"><span class="unit">%</span>
+            <span class="resolved" id="ratioOut">→ 512×512px</span>
+          </div>
+
+          <!-- width/height sub-controls with aspect lock -->
+          <div class="dims" id="dimsRow" style="margin-top:12px; display:none">
+            <input class="num wide" type="number" id="dimW" value="512">
+            <span class="times">×</span>
+            <input class="num wide" type="number" id="dimH" value="512">
+            <!-- aspect lock: editing one recomputes the other. NEW: real toggle
+                 (the old UI only had a static 🔗 label — lock could not be turned off) -->
+            <button class="lock" id="lock" aria-pressed="true" title="Aspect ratio locked — click to unlock">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            </button>
+            <span class="unit">px</span>
+          </div>
+        </div>
+
+        <!-- BACKGROUND — transparent toggle -->
+        <div class="field">
+          <label class="title">Background</label>
+          <div class="switch-row">
+            <div class="checker-mini checker"></div>
+            <div class="st">
+              <div class="lbl">Make transparent</div>
+              <div class="desc">Flood-key the edge background before tracing.</div>
+            </div>
+            <!-- on toggle: run keyOutBackground() on the canvas before upload -->
+            <button class="switch" id="bgTransparent" aria-pressed="false" aria-label="Transparent background"></button>
+          </div>
+        </div>
+
+        <!-- PRIMARY ACTION -->
+        <div class="field">
+          <button class="btn primary block" id="run">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3l14 9-14 9V3z"/></svg>
+            Trace → SVG
+          </button>
+          <div class="help">Vector output scales to any size with no blur. Larger images take longer.</div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ══ OUTPUT ════════════════════════════════════════ -->
+    <section class="panel">
+      <div class="panel-head">
+        <span class="step">2</span><h2>Output</h2>
+        <div class="spacer"></div>
+        <!-- NEW: compare toggle (raster vs traced SVG) -->
+        <button class="btn ghost sm" id="compareBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18"/><path d="M5 7l-2 2 2 2"/><path d="M19 7l2 2-2 2"/></svg>
+          Compare
+        </button>
+        <button class="btn ghost sm" id="expandBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+          Expand
+        </button>
+      </div>
+      <div class="panel-body">
+
+        <div class="stage checker" id="stage">
+
+          <!-- RESULT: the traced SVG rendered on checkerboard -->
+          <div id="resultLayer" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%">
+            <!-- sample traced output stand-in (a real trace = stacked color <path>s) -->
+            <svg viewBox="0 0 200 200" id="sampleSvg">
+              <circle cx="100" cy="108" r="62" fill="#7cc36e"/>
+              <ellipse cx="100" cy="60" rx="46" ry="34" fill="#4f9b57"/>
+              <path d="M60 40 Q68 8 88 34 Z" fill="#3c7c46"/>
+              <path d="M140 40 Q132 8 112 34 Z" fill="#3c7c46"/>
+              <circle cx="78" cy="104" r="10" fill="#1f2c1c"/><circle cx="122" cy="104" r="10" fill="#1f2c1c"/>
+              <circle cx="81" cy="101" r="3" fill="#fff"/><circle cx="125" cy="101" r="3" fill="#fff"/>
+              <path d="M82 132 q18 16 36 0" stroke="#1f2c1c" stroke-width="5" fill="none" stroke-linecap="round"/>
+              <ellipse cx="66" cy="126" rx="9" ry="5" fill="#e88a9a" opacity=".7"/>
+              <ellipse cx="134" cy="126" rx="9" ry="5" fill="#e88a9a" opacity=".7"/>
+            </svg>
+          </div>
+
+          <!-- COMPARE: raster | vector split (NEW) -->
+          <div class="compare-wrap" id="compareWrap">
+            <div class="layer raster">
+              <!-- stand-in for the source bitmap (pixelated look) -->
+              <svg viewBox="0 0 200 200" style="filter:blur(.4px)">
+                <rect width="200" height="200" fill="#fbfbfb"/>
+                <circle cx="100" cy="108" r="62" fill="#7cc36e"/>
+                <ellipse cx="100" cy="60" rx="46" ry="34" fill="#4f9b57"/>
+                <circle cx="78" cy="104" r="10" fill="#1f2c1c"/><circle cx="122" cy="104" r="10" fill="#1f2c1c"/>
+                <path d="M82 132 q18 16 36 0" stroke="#1f2c1c" stroke-width="5" fill="none"/>
+              </svg>
+            </div>
+            <div class="layer vector" id="vectorClip">
+              <svg viewBox="0 0 200 200">
+                <rect width="200" height="200" fill="#fbfbfb"/>
+                <circle cx="100" cy="108" r="62" fill="#7cc36e"/>
+                <ellipse cx="100" cy="60" rx="46" ry="34" fill="#4f9b57"/>
+                <path d="M60 40 Q68 8 88 34 Z" fill="#3c7c46"/><path d="M140 40 Q132 8 112 34 Z" fill="#3c7c46"/>
+                <circle cx="78" cy="104" r="10" fill="#1f2c1c"/><circle cx="122" cy="104" r="10" fill="#1f2c1c"/>
+                <path d="M82 132 q18 16 36 0" stroke="#1f2c1c" stroke-width="5" fill="none" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <div class="compare-tag l">RASTER</div>
+            <div class="compare-tag r">SVG</div>
+            <div class="compare-handle" id="compareHandle" style="left:50%">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></svg>
+            </div>
+          </div>
+
+          <div class="stage-hint">scroll to zoom · click ⛶ for fullscreen</div>
+
+          <!-- EMPTY state -->
+          <div class="empty-state" id="emptyState" style="display:none">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>
+            </svg>
+            <div class="t">No output yet</div>
+            <div class="s">Drop an image and hit <b>Trace → SVG</b> to see the vector here.</div>
+          </div>
+
+          <!-- LOADING state -->
+          <div class="loading-state" id="loadingState">
+            <div class="spinner"></div>
+            <div class="t">Tracing…</div>
+            <div class="s">python + vtracer · quality=faithful</div>
+            <div class="progress"><i></i></div>
+          </div>
+
+          <!-- ERROR state -->
+          <div class="error-state" id="errorState">
+            <div class="ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+            </div>
+            <div class="t">Trace failed</div>
+            <div class="code" id="errorCode">422 · vtracer: unsupported color depth in source image</div>
+            <button class="btn sm" id="retryBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5"/></svg>
+              Retry
+            </button>
+          </div>
+
+        </div>
+
+        <!-- output toolbar -->
+        <div class="out-tools" id="outTools">
+          <span class="filename"><b>sprout-starter.svg</b> · 41.6 KB · 312 ms</span>
+          <div class="spacer"></div>
+          <!-- NEW: copy raw SVG markup to clipboard -->
+          <button class="btn sm" id="copyBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+            Copy SVG
+          </button>
+          <button class="btn sm primary" id="downloadBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
+            Download .svg
+          </button>
+        </div>
+
+        <!-- STAT CARDS — visual surfacing of the trace metrics (NEW presentation) -->
+        <div class="stats" id="stats">
+          <div class="stat"><div class="k">Input</div><div class="v">84.2<small> KB</small></div></div>
+          <div class="stat"><div class="k">Output</div><div class="v">41.6<small> KB</small></div></div>
+          <div class="stat good"><div class="k">Size ratio</div><div class="v">2.0×<small> smaller</small></div></div>
+          <div class="stat"><div class="k">Paths</div><div class="v">148</div></div>
+        </div>
+
+      </div>
+    </section>
+  </div>
+
+  <!-- ══ LOG ═══════════════════════════════════════════════ -->
+  <section class="panel" style="margin-top:18px">
+    <div class="panel-head">
+      <span class="step">3</span><h2>Log</h2>
+      <div class="spacer"></div>
+      <button class="btn ghost sm" id="clearLog">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14"/></svg>
+        Clear
+      </button>
+    </div>
+    <div class="panel-body">
+      <div class="log" id="log"><span class="line"><span class="ts">[10:42:01]</span> <span class="info">ready. drop an image to start.</span></span>
+<span class="line"><span class="ts">[10:42:14]</span> <span class="info">selected sprout-starter.png — image/png · 512×512px · 84.2 KB</span></span>
+<span class="line"><span class="ts">[10:42:20]</span> <span class="info">tracing sprout-starter.png @ faithful …</span></span>
+<span class="line"><span class="ts">[10:42:20]</span> <span class="ok">done → sprout-starter.svg</span></span>
+<span class="line">  <span class="metric">input:  512×512px · 84.2 KB (traced)</span></span>
+<span class="line">  <span class="metric">output: 41.6 KB · 148 paths · viewBox 0 0 512 512</span></span>
+<span class="line">  <span class="ok">size:   2.0× smaller than source · 312 ms · quality=faithful</span></span></div>
+    </div>
+  </section>
+
+  <p class="footnote"><span class="tag-new">NEW</span> purple-tagged elements are proposed additions — everything else is a redesign of a feature that already exists.</p>
+
+</div>
+
+<!-- ══ LIGHTBOX (fullscreen, zoom + pan) ═══════════════════ -->
+<div class="lightbox" id="lightbox">
+  <div class="lb-bar">
+    <button class="icon-btn" id="zoomOut" aria-label="Zoom out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/></svg></button>
+    <span class="zoomval" id="zoomVal">100%</span>
+    <button class="icon-btn" id="zoomIn" aria-label="Zoom in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></button>
+    <button class="icon-btn" id="zoomReset" aria-label="Fit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8V4h4M21 8V4h-4M3 16v4h4M21 16v4h-4"/></svg></button>
+  </div>
+  <button class="lb-close" id="lbClose" aria-label="Close (Esc)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  <div class="lb-stage checker" id="lbStage">
+    <div class="lb-canvas" id="lbCanvas"></div>
+  </div>
+  <!-- NEW: drag to pan, scroll / +− to zoom -->
+  <div class="lb-hint">scroll or +/− to zoom · drag to pan · Esc to close</div>
+</div>
+
+<script>
+/* ─────────────────────────────────────────────────────────────
+   This is a design MOCK. Interactions are wired so reviewers can
+   feel the controls; the real trace call (POST /api/trace) is
+   stubbed. Vanilla JS only — ports straight into the embedded
+   single-file UI. Comments mark where real logic plugs in.
+   ───────────────────────────────────────────────────────────── */
+const $ = s => document.querySelector(s);
+
+/* segmented-control helper (quality / resize mode / mock state) */
+function wireSegmented(root, onPick) {
+  root.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    root.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', 'false'));
+    b.setAttribute('aria-pressed', 'true');
+    onPick(b);
+  }));
+}
+
+/* ── quality preset ── */
+let quality = 'faithful';
+wireSegmented($('#quality'), b => { quality = b.dataset.q; });
+
+/* ── resize mode (Original / By ratio / By size) ── */
+const ratioRow = $('#ratioRow'), dimsRow = $('#dimsRow');
+wireSegmented($('#resizeMode'), b => {
+  ratioRow.style.display = b.dataset.m === 'ratio' ? 'flex' : 'none';
+  dimsRow.style.display  = b.dataset.m === 'dims'  ? 'flex' : 'none';
+});
+
+/* ── ratio → resolved px hint ── */
+const srcW = 512, srcH = 512; // real: from the picked image's naturalWidth/Height
+$('#ratioPct').addEventListener('input', e => {
+  const r = (+e.target.value || 100) / 100;
+  $('#ratioOut').textContent = `→ ${Math.max(1, Math.round(srcW*r))}×${Math.max(1, Math.round(srcH*r))}px`;
+});
+
+/* ── aspect lock: editing one dim recomputes the other (when locked) ── */
+const lock = $('#lock'), dimW = $('#dimW'), dimH = $('#dimH');
+lock.addEventListener('click', () => {
+  const on = lock.getAttribute('aria-pressed') === 'true';
+  lock.setAttribute('aria-pressed', String(!on));
+  lock.title = on ? 'Aspect ratio unlocked — dimensions independent' : 'Aspect ratio locked — click to unlock';
+});
+const locked = () => lock.getAttribute('aria-pressed') === 'true';
+dimW.addEventListener('input', () => { if (locked() && dimW.value) dimH.value = Math.max(1, Math.round(+dimW.value * srcH/srcW)); });
+dimH.addEventListener('input', () => { if (locked() && dimH.value) dimW.value = Math.max(1, Math.round(+dimH.value * srcW/srcH)); });
+
+/* ── transparent-background switch ── */
+$('#bgTransparent').addEventListener('click', e => {
+  const on = e.currentTarget.getAttribute('aria-pressed') === 'true';
+  e.currentTarget.setAttribute('aria-pressed', String(!on));
+});
+
+/* ── drop / preview swap (mock shows the picked state by default) ── */
+$('#drop').style.display = 'none'; // real: shown until a file is picked
+$('#swapBtn').addEventListener('click', () => {
+  $('#preview').style.display = 'none';
+  $('#drop').style.display = 'block';
+});
+
+/* ── log helper ── */
+const logEl = $('#log');
+function log(msg, cls='') {
+  const t = new Date().toLocaleTimeString([], {hour12:false});
+  const line = document.createElement('span');
+  line.className = 'line';
+  line.innerHTML = `<span class="ts">[${t}]</span> <span class="${cls}">${msg}</span>`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+$('#clearLog').addEventListener('click', () => { logEl.innerHTML = ''; log('log cleared.', 'info'); });
+
+/* ── OUTPUT STATE MACHINE ──
+   Real states: empty | loading | result | error. `compare` is a
+   view mode layered on top of `result`. */
+const layers = {
+  result:  $('#resultLayer'),
+  compare: $('#compareWrap'),
+  empty:   $('#emptyState'),
+  loading: $('#loadingState'),
+  error:   $('#errorState'),
+};
+const outTools = $('#outTools'), stats = $('#stats'), stageHint = $('.stage-hint');
+function setState(state) {
+  Object.entries(layers).forEach(([k, el]) => {
+    el.style.display = (k === state) ? (k === 'result' ? 'flex' : 'flex') : 'none';
+  });
+  const hasOutput = (state === 'result' || state === 'compare');
+  outTools.style.display = hasOutput ? 'flex' : 'none';
+  stats.style.display = hasOutput ? 'grid' : 'none';
+  stageHint.style.display = hasOutput ? 'block' : 'none';
+  if (state === 'compare') layers.result.style.display = 'none';
+}
+setState('result');
+
+/* mock-only state switcher */
+wireSegmented($('#mockState'), b => setState(b.dataset.state));
+
+/* ── compare toggle (from output toolbar) ── */
+$('#compareBtn').addEventListener('click', () => setState('compare'));
+$('#retryBtn').addEventListener('click', () => { setState('loading'); setTimeout(() => setState('result'), 1400); });
+
+/* ── compare slider drag ── */
+(function(){
+  const wrap = $('#compareWrap'), handle = $('#compareHandle'), clip = $('#vectorClip');
+  function setPct(pct){
+    pct = Math.max(0, Math.min(100, pct));
+    handle.style.left = pct + '%';
+    clip.style.clipPath = `inset(0 ${100-pct}% 0 0)`;
+  }
+  setPct(50);
+  let drag = false;
+  const move = e => {
+    if (!drag) return;
+    const r = wrap.getBoundingClientRect();
+    const x = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    setPct(x / r.width * 100);
+  };
+  handle.addEventListener('mousedown', () => drag = true);
+  handle.addEventListener('touchstart', () => drag = true, {passive:true});
+  window.addEventListener('mousemove', move);
+  window.addEventListener('touchmove', move, {passive:true});
+  window.addEventListener('mouseup', () => drag = false);
+  window.addEventListener('touchend', () => drag = false);
+})();
+
+/* ── run (stubbed trace) ── */
+$('#run').addEventListener('click', () => {
+  setState('loading');
+  log(`tracing sprout-starter.png @ ${quality} …`, 'info');
+  // real: prepareInput() → fetch('/api/trace') → render SVG + metrics
+  setTimeout(() => {
+    setState('result');
+    log('done → sprout-starter.svg', 'ok');
+    log('&nbsp;&nbsp;output: 41.6 KB · 148 paths', 'metric');
+  }, 1600);
+});
+
+/* ── copy SVG to clipboard (NEW) ── */
+$('#copyBtn').addEventListener('click', e => {
+  const svg = $('#sampleSvg').outerHTML;              // real: the traced SVG text
+  navigator.clipboard?.writeText(svg).catch(()=>{});
+  const btn = e.currentTarget, orig = btn.innerHTML;
+  btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg> Copied';
+  setTimeout(() => btn.innerHTML = orig, 1300);
+});
+$('#downloadBtn').addEventListener('click', () => log('downloaded sprout-starter.svg', 'info'));
+
+/* ── LIGHTBOX with zoom + pan (NEW: pan + zoom controls) ── */
+const lightbox = $('#lightbox'), lbStage = $('#lbStage'), lbCanvas = $('#lbCanvas'), zoomVal = $('#zoomVal');
+let zoom = 1, panX = 0, panY = 0;
+function applyTransform(){ lbCanvas.style.transform = `translate(${panX}px,${panY}px) scale(${zoom})`; zoomVal.textContent = Math.round(zoom*100)+'%'; }
+function openLightbox(){
+  lbCanvas.innerHTML = $('#sampleSvg').outerHTML;   // real: the traced SVG
+  zoom = 1; panX = panY = 0; applyTransform();
+  lightbox.classList.add('open');
+}
+function closeLightbox(){ lightbox.classList.remove('open'); }
+$('#expandBtn').addEventListener('click', openLightbox);
+$('#lbClose').addEventListener('click', closeLightbox);
+lightbox.addEventListener('click', e => { if (e.target === lightbox) closeLightbox(); });
+$('#zoomIn').addEventListener('click', () => { zoom = Math.min(8, zoom*1.25); applyTransform(); });
+$('#zoomOut').addEventListener('click', () => { zoom = Math.max(.25, zoom/1.25); applyTransform(); });
+$('#zoomReset').addEventListener('click', () => { zoom = 1; panX = panY = 0; applyTransform(); });
+lbStage.addEventListener('wheel', e => { e.preventDefault(); zoom = Math.max(.25, Math.min(8, zoom * (e.deltaY < 0 ? 1.1 : .9))); applyTransform(); }, {passive:false});
+/* drag to pan */
+let panning = false, sx = 0, sy = 0;
+lbStage.addEventListener('mousedown', e => { panning = true; sx = e.clientX - panX; sy = e.clientY - panY; lbStage.classList.add('grabbing'); });
+window.addEventListener('mousemove', e => { if (!panning) return; panX = e.clientX - sx; panY = e.clientY - sy; applyTransform(); });
+window.addEventListener('mouseup', () => { panning = false; lbStage.classList.remove('grabbing'); });
+
+/* keyboard: Esc closes, +/- zoom */
+document.addEventListener('keydown', e => {
+  if (!lightbox.classList.contains('open')) return;
+  if (e.key === 'Escape') closeLightbox();
+  if (e.key === '+' || e.key === '=') { zoom = Math.min(8, zoom*1.25); applyTransform(); }
+  if (e.key === '-') { zoom = Math.max(.25, zoom/1.25); applyTransform(); }
+});
+</script>
+</body>
+</html>
