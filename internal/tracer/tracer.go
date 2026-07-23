@@ -8,8 +8,34 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"time"
 )
+
+var (
+	svgTagRe    = regexp.MustCompile(`<svg\b[^>]*>`)
+	svgWidthRe  = regexp.MustCompile(`\bwidth="([0-9.]+)"`)
+	svgHeightRe = regexp.MustCompile(`\bheight="([0-9.]+)"`)
+)
+
+// ensureViewBox injects a viewBox onto the root <svg> when vtracer emits only
+// width/height. Without a viewBox the SVG has no coordinate scaling, so CSS
+// max-width/max-height crops it instead of resizing — the preview clips tall
+// or large images. Deriving viewBox from width/height makes it scale cleanly.
+func ensureViewBox(svg []byte) []byte {
+	tag := svgTagRe.Find(svg)
+	if tag == nil || bytes.Contains(tag, []byte("viewBox")) {
+		return svg
+	}
+	width := svgWidthRe.FindSubmatch(tag)
+	height := svgHeightRe.FindSubmatch(tag)
+	if width == nil || height == nil {
+		return svg
+	}
+	viewBox := fmt.Sprintf(` viewBox="0 0 %s %s">`, width[1], height[1])
+	newTag := append(tag[:len(tag)-1:len(tag)-1], []byte(viewBox)...)
+	return bytes.Replace(svg, tag, newTag, 1)
+}
 
 // Quality presets mirror the CLI's -q flag.
 var validQuality = map[string]bool{
@@ -54,5 +80,5 @@ func (t *Tracer) Trace(ctx context.Context, image []byte, quality string) ([]byt
 		}
 		return nil, fmt.Errorf("trace failed: %v: %s", err, stderr.String())
 	}
-	return stdout.Bytes(), nil
+	return ensureViewBox(stdout.Bytes()), nil
 }
