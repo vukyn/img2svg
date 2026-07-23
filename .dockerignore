@@ -1,0 +1,11 @@
+bin/
+ui/node_modules/
+ui/dist/
+internal/web/dist/
+*.svg
+__pycache__/
+*.pyc
+.venv/
+.git/
+.code-review-graph/
+demo/
