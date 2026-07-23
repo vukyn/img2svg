@@ -51,7 +51,7 @@ export function CompareSlider({ rasterUrl, svgText }: CompareSliderProps) {
 			</div>
 			<div
 				className="layer vector"
-				style={{ clipPath: `inset(0 ${100 - pct}% 0 0)` }}
+				style={{ clipPath: `inset(0 0 0 ${pct}%)` }}
 				dangerouslySetInnerHTML={{ __html: svgText }}
 			/>
 			<div className="compare-tag l">RASTER</div>
