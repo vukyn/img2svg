@@ -1,6 +1,20 @@
 # img2svg
 
-Trace a raster image (Pokémon art, icons, logos) into scalable vector **SVG**. Vector = scale infinite, no blur.
+**🔗 Live: https://img2svg.fly.dev**
+
+Turn any raster image — Pokémon art, logos, icons, screenshots — into a clean, infinitely-scalable **SVG**. Drop, click, or paste (⌘V) an image, tune the quality, size, and background, then trace it to vector you can zoom forever with **no blur**. Compare the result against the source side-by-side, inspect it full-screen, and copy or download the SVG.
+
+## Features
+
+- **Color tracing** (vtracer engine) with 3 quality presets — `faithful` (exact) · `balanced` · `small` (~5× smaller, great for icons).
+- **Resize** before tracing — by ratio (%) or exact width/height with the **aspect ratio locked**.
+- **Transparent background** — flood-removes the background so the SVG drops onto any surface.
+- **Raster ↔ SVG compare slider**, a **zoom/pan fullscreen** viewer, and one-click **copy** / **download** of the SVG.
+- Live **log** + **stat cards**: input/output size, path count, size ratio, trace time.
+
+Supports png · jpg · gif · bmp · webp.
+
+---
 
 Two layers:
 - **python CLI** (`cli/img2svg.py`) — the tracing engine, wraps [vtracer](https://github.com/visioncortex/vtracer) (Rust) color tracing.
