@@ -52,15 +52,24 @@
     color: var(--muted); white-space: pre-wrap;
   }
   #log .ok { color: var(--ok); } #log .err { color: var(--err); } #log .info { color: var(--accent2); }
+  /* checkerboard so transparent SVGs are visible; opaque ones just cover it */
+  .checker { background-color: #fff;
+    background-image:
+      linear-gradient(45deg, #d0d0d0 25%, transparent 25%),
+      linear-gradient(-45deg, #d0d0d0 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #d0d0d0 75%),
+      linear-gradient(-45deg, transparent 75%, #d0d0d0 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0; }
   #out { min-height: 150px; max-height: 420px; display: flex; align-items: center; justify-content: center;
-    background: #fff; border-radius: 8px; overflow: auto; padding: 8px; }
+    border-radius: 8px; overflow: auto; padding: 8px; }
   #out svg, #out img { max-width: 100%; max-height: 400px; width: auto; height: auto; }
-  #out.empty { background: var(--panel2); color: var(--muted); font-size: 13px; }
+  #out.empty { background: var(--panel2) !important; color: var(--muted); font-size: 13px; }
   /* fullscreen lightbox */
   #lightbox { position: fixed; inset: 0; background: rgba(6,10,14,.92); z-index: 50;
     display: flex; align-items: center; justify-content: center; padding: 32px; }
   #lightbox[hidden] { display: none; }  /* beat the id-specificity display:flex above */
-  #lightboxStage { background: #fff; border-radius: 10px; padding: 16px; max-width: 96vw; max-height: 92vh;
+  #lightboxStage { border-radius: 10px; padding: 16px; max-width: 96vw; max-height: 92vh;
     overflow: auto; display: flex; align-items: center; justify-content: center; }
   #lightboxStage svg, #lightboxStage img { max-width: 92vw; max-height: 88vh; width: auto; height: auto; }
   #lightboxClose { position: fixed; top: 18px; right: 22px; font-size: 22px; line-height: 1;
@@ -111,6 +120,13 @@
         <span title="aspect ratio linked">🔗 px</span>
       </div>
       <div class="row">
+        <label style="color:var(--muted)">Background</label>
+        <label style="display:flex;align-items:center;gap:8px;width:auto;cursor:pointer">
+          <input type="checkbox" id="bgTransparent" style="width:auto">
+          <span>transparent (drop background before tracing)</span>
+        </label>
+      </div>
+      <div class="row">
         <button class="go" id="run" disabled>Trace → SVG</button>
       </div>
     </div>
@@ -131,7 +147,7 @@
       <h2>3 · Output</h2>
       <button class="mini" id="expand" hidden title="Expand to full view">⛶ Expand</button>
     </div>
-    <div id="out" class="empty">SVG output shows here</div>
+    <div id="out" class="empty checker">SVG output shows here</div>
     <div class="meta">
       <span id="outName">no output yet</span>
       <button class="ghost" id="download" hidden>Download .svg</button>
@@ -142,7 +158,7 @@
 <!-- FULLSCREEN PREVIEW -->
 <div id="lightbox" hidden>
   <button id="lightboxClose" title="Close (Esc)">✕</button>
-  <div id="lightboxStage"></div>
+  <div id="lightboxStage" class="checker"></div>
 </div>
 
 <script>
@@ -260,13 +276,55 @@
     }
     return null;
   }
-  // draw the image onto a canvas at target size -> PNG blob
-  async function resizedBlob(file, w, h) {
+  // flood-fill from the borders, turning background-colored pixels transparent.
+  // Edge-connected only, so same-colored regions inside the subject (e.g. white
+  // eyes on a white bg) are preserved. bg color = average of the 4 corners.
+  function keyOutBackground(imageData, tol) {
+    const { data, width, height } = imageData;
+    const corners = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]];
+    let r = 0, g = 0, b = 0;
+    for (const [x, y] of corners) { const i = (y * width + x) * 4; r += data[i]; g += data[i + 1]; b += data[i + 2]; }
+    r /= 4; g /= 4; b /= 4;
+    const matches = i => Math.abs(data[i] - r) <= tol && Math.abs(data[i + 1] - g) <= tol && Math.abs(data[i + 2] - b) <= tol;
+
+    const seen = new Uint8Array(width * height);
+    const stack = [];
+    for (let x = 0; x < width; x++) { stack.push(x, 0, x, height - 1); }
+    for (let y = 0; y < height; y++) { stack.push(0, y, width - 1, y); }
+    while (stack.length) {
+      const y = stack.pop(), x = stack.pop();
+      if (x < 0 || y < 0 || x >= width || y >= height) continue;
+      const p = y * width + x;
+      if (seen[p]) continue;
+      seen[p] = 1;
+      const i = p * 4;
+      if (!matches(i)) continue;
+      data[i + 3] = 0; // transparent
+      stack.push(x + 1, y, x - 1, y, x, y + 1, x, y - 1);
+    }
+    return imageData;
+  }
+
+  // draw the image onto a canvas (resized if target given), optionally key out
+  // the background, and return a PNG blob + final dimensions. Returns null when
+  // no canvas step is needed (use the original file as-is).
+  async function prepareInput(file, target, transparent) {
+    const resize = target && pickedMeta && (target.w !== pickedMeta.w || target.h !== pickedMeta.h);
+    if (!resize && !transparent) return null;
+    const w = target ? target.w : pickedMeta.w;
+    const h = target ? target.h : pickedMeta.h;
     const bitmap = await createImageBitmap(file);
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
-    canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
-    return await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    if (transparent) {
+      const id = ctx.getImageData(0, 0, w, h);
+      keyOutBackground(id, 32);
+      ctx.putImageData(id, 0, 0);
+    }
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    return { blob, w, h, resized: resize, transparent };
   }
 
   runBtn.addEventListener('click', async () => {
@@ -276,14 +334,17 @@
     log(`tracing ${picked.name} @ ${quality} …`, 'info');
     const t0 = performance.now();
 
-    // resize input if requested (aspect kept by targetSize)
+    // prepare input: optional resize (aspect kept by targetSize) + optional
+    // background removal (flood-keyed to transparent so vtracer skips it)
     let uploadBlob = picked;
     let usedW = pickedMeta ? pickedMeta.w : null, usedH = pickedMeta ? pickedMeta.h : null;
-    const tgt = targetSize();
-    if (tgt && pickedMeta && (tgt.w !== pickedMeta.w || tgt.h !== pickedMeta.h)) {
-      log(`resizing input ${pickedMeta.w}×${pickedMeta.h} → ${tgt.w}×${tgt.h}px …`, 'info');
-      uploadBlob = await resizedBlob(picked, tgt.w, tgt.h);
-      usedW = tgt.w; usedH = tgt.h;
+    const transparent = document.getElementById('bgTransparent').checked;
+    const prepped = await prepareInput(picked, targetSize(), transparent);
+    if (prepped) {
+      uploadBlob = prepped.blob; usedW = prepped.w; usedH = prepped.h;
+      const notes = [prepped.resized ? `resized → ${prepped.w}×${prepped.h}` : null,
+                     prepped.transparent ? 'bg → transparent' : null].filter(Boolean).join(' · ');
+      log(`prepared input (${notes}) …`, 'info');
     }
 
     const fd = new FormData();
