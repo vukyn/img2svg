@@ -28,6 +28,9 @@
   .mini { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line);
     background: var(--panel2); color: var(--muted); cursor: pointer; margin-bottom: 12px; }
   .mini:hover { color: var(--fg); border-color: var(--accent); }
+  input[type=number] { font: inherit; width: 84px; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel2); color: var(--fg); }
+  .hint { color: var(--muted); font-size: 12px; }
   #drop {
     border: 2px dashed var(--line); border-radius: 10px; padding: 28px 16px; text-align: center;
     cursor: pointer; transition: .15s; color: var(--muted);
@@ -85,6 +88,27 @@
           <option value="balanced">balanced</option>
           <option value="small">small — icons</option>
         </select>
+      </div>
+      <div class="row">
+        <label for="resizeMode" style="color:var(--muted)">Resize</label>
+        <select id="resizeMode">
+          <option value="none">none — original size</option>
+          <option value="ratio">by ratio (%)</option>
+          <option value="dims">by width / height</option>
+        </select>
+      </div>
+      <div class="row" id="ratioRow" hidden>
+        <label style="color:var(--muted)">Scale</label>
+        <input type="number" id="ratioPct" value="100" min="1" max="400" step="1">
+        <span style="color:var(--muted)">%</span>
+        <span class="hint" id="ratioOut"></span>
+      </div>
+      <div class="row" id="dimsRow" hidden>
+        <label style="color:var(--muted)">Size</label>
+        <input type="number" id="dimW" min="1"><span style="color:var(--muted)">×</span><input type="number" id="dimH" min="1">
+        <span title="aspect ratio locked">🔒 px</span>
+      </div>
+      <div class="row">
         <button class="go" id="run" disabled>Trace → SVG</button>
       </div>
     </div>
@@ -151,6 +175,8 @@
       pickedMeta = { w: img.naturalWidth, h: img.naturalHeight };
       dropText.innerHTML = `<img src="${url}" alt="preview"><br>${f.name} · ${img.naturalWidth}×${img.naturalHeight} · ${human(f.size)}`;
       log(`selected ${f.name} — ${f.type || '?'} · ${img.naturalWidth}×${img.naturalHeight}px · ${human(f.size)}`, 'info');
+      fillDims();
+      updateRatioHint();
     };
     img.onerror = () => {
       dropText.innerHTML = `<img src="${url}" alt="preview"><br>${f.name} · ${human(f.size)}`;
@@ -185,6 +211,62 @@
   ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
   drop.addEventListener('drop', e => setFile(e.dataTransfer.files[0]));
 
+  // ── resize controls (ratio, or width/height with locked aspect) ──
+  const resizeMode = document.getElementById('resizeMode');
+  const ratioRow = document.getElementById('ratioRow');
+  const dimsRow = document.getElementById('dimsRow');
+  const ratioPct = document.getElementById('ratioPct');
+  const ratioOut = document.getElementById('ratioOut');
+  const dimW = document.getElementById('dimW');
+  const dimH = document.getElementById('dimH');
+
+  function syncResizeUI() {
+    ratioRow.hidden = resizeMode.value !== 'ratio';
+    dimsRow.hidden = resizeMode.value !== 'dims';
+    updateRatioHint();
+  }
+  function updateRatioHint() {
+    if (!pickedMeta) { ratioOut.textContent = ''; return; }
+    const r = (+ratioPct.value || 100) / 100;
+    ratioOut.textContent = `→ ${Math.max(1, Math.round(pickedMeta.w * r))}×${Math.max(1, Math.round(pickedMeta.h * r))}px`;
+  }
+  function fillDims() {
+    if (!pickedMeta) return;
+    dimW.value = pickedMeta.w; dimH.value = pickedMeta.h;
+  }
+  resizeMode.addEventListener('change', syncResizeUI);
+  ratioPct.addEventListener('input', updateRatioHint);
+  // aspect locked: editing one dimension recomputes the other from the original ratio
+  dimW.addEventListener('input', () => {
+    if (!pickedMeta || !dimW.value) return;
+    dimH.value = Math.max(1, Math.round(+dimW.value * pickedMeta.h / pickedMeta.w));
+  });
+  dimH.addEventListener('input', () => {
+    if (!pickedMeta || !dimH.value) return;
+    dimW.value = Math.max(1, Math.round(+dimH.value * pickedMeta.w / pickedMeta.h));
+  });
+
+  // target size for the current mode, or null = keep original
+  function targetSize() {
+    if (!pickedMeta) return null;
+    if (resizeMode.value === 'ratio') {
+      const r = (+ratioPct.value || 100) / 100;
+      return { w: Math.max(1, Math.round(pickedMeta.w * r)), h: Math.max(1, Math.round(pickedMeta.h * r)) };
+    }
+    if (resizeMode.value === 'dims') {
+      return { w: Math.max(1, +dimW.value || pickedMeta.w), h: Math.max(1, +dimH.value || pickedMeta.h) };
+    }
+    return null;
+  }
+  // draw the image onto a canvas at target size -> PNG blob
+  async function resizedBlob(file, w, h) {
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+    return await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+  }
+
   runBtn.addEventListener('click', async () => {
     if (!picked) return;
     const quality = document.getElementById('quality').value;
@@ -192,8 +274,18 @@
     log(`tracing ${picked.name} @ ${quality} …`, 'info');
     const t0 = performance.now();
 
+    // resize input if requested (aspect kept by targetSize)
+    let uploadBlob = picked;
+    let usedW = pickedMeta ? pickedMeta.w : null, usedH = pickedMeta ? pickedMeta.h : null;
+    const tgt = targetSize();
+    if (tgt && pickedMeta && (tgt.w !== pickedMeta.w || tgt.h !== pickedMeta.h)) {
+      log(`resizing input ${pickedMeta.w}×${pickedMeta.h} → ${tgt.w}×${tgt.h}px …`, 'info');
+      uploadBlob = await resizedBlob(picked, tgt.w, tgt.h);
+      usedW = tgt.w; usedH = tgt.h;
+    }
+
     const fd = new FormData();
-    fd.append('image', picked);
+    fd.append('image', uploadBlob, picked.name);
     fd.append('quality', quality);
 
     try {
@@ -205,7 +297,7 @@
       }
       const svg = await res.text();
       const ms = (performance.now() - t0).toFixed(0);
-      const inBytes = picked.size;
+      const inBytes = uploadBlob.size;
       const outBytes = new Blob([svg]).size;
 
       // derive extra metrics from the SVG text
@@ -226,7 +318,7 @@
       dlBtn.onclick = () => { const a = document.createElement('a'); a.href = svgBlobUrl; a.download = name; a.click(); };
 
       log(`done → ${name}`, 'ok');
-      log(`  input:  ${pickedMeta ? pickedMeta.w + '×' + pickedMeta.h + 'px · ' : ''}${human(inBytes)} (${picked.type || '?'})`);
+      log(`  input:  ${usedW && usedH ? usedW + '×' + usedH + 'px · ' : ''}${human(inBytes)} (traced)`);
       log(`  output: ${human(outBytes)} · ${paths} paths${viewBox ? ' · viewBox ' + viewBox : ''}`);
       const sizeNote = ratio >= 1 ? ratio.toFixed(1) + '× smaller' : (1 / ratio).toFixed(1) + '× larger';
       log(`  size:   ${sizeNote} than source · ${ms} ms · quality=${quality}`, ratio >= 1 ? 'ok' : 'info');
