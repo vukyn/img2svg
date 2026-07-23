@@ -23,6 +23,11 @@
   @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
   .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+  .panelHead { display: flex; align-items: center; justify-content: space-between; }
+  .panelHead h2 { margin: 0 0 12px; }
+  .mini { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--panel2); color: var(--muted); cursor: pointer; margin-bottom: 12px; }
+  .mini:hover { color: var(--fg); border-color: var(--accent); }
   #drop {
     border: 2px dashed var(--line); border-radius: 10px; padding: 28px 16px; text-align: center;
     cursor: pointer; transition: .15s; color: var(--muted);
@@ -76,7 +81,10 @@
 
     <!-- LOG -->
     <div class="panel">
-      <h2>2 · Log</h2>
+      <div class="panelHead">
+        <h2>2 · Log</h2>
+        <button class="mini" id="clearLog">Clear</button>
+      </div>
       <div id="log"></div>
     </div>
   </div>
@@ -128,6 +136,11 @@
     };
     img.src = url;
   }
+
+  document.getElementById('clearLog').addEventListener('click', () => {
+    logEl.innerHTML = '';
+    log('log cleared.', 'info');
+  });
 
   drop.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', e => setFile(e.target.files[0]));
