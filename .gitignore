@@ -1,0 +1,7 @@
+bin/
+*.svg
+__pycache__/
+*.pyc
+.venv/
+.env
+.code-review-graph/
