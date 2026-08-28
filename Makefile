@@ -21,7 +21,7 @@ build-web: ## build the UI into internal/web/dist (must run before `go build`)
 	touch internal/web/dist/.gitkeep
 
 # --- python CLI ---
-cli-deps: ## install python CLI deps (vtracer)
+cli-deps: ## install python CLI deps (vtracer, Pillow for --decheck)
 	python3 -m pip install -r cli/requirements.txt
 
 clean:
