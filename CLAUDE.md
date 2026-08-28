@@ -48,6 +48,26 @@ on a fresh checkout).
 
 Quality presets `faithful|balanced|small` live in `PRESETS` in the CLI and are mirrored in `internal/tracer` validation — **keep both in sync** when adding a preset.
 
+`--decheck` (`cli/decheck.py`) strips a **baked-in transparency chequerboard**: a
+transparent PNG saved as JPEG keeps the chequer the viewer was painting behind it,
+as ordinary pixels, and tracing that wraps the subject in a grey-and-white
+background. **Off by default** — it is a repair, and a clean image should not go
+through a filter that could take a white collar off it.
+
+- ⚠️ **Not a colour to erase.** Pale-and-unsaturated also describes an eye
+  highlight, a white fur collar and a metal headband; the first version holed all
+  three. A border flood spares them (a drawing's whites are enclosed by its
+  outlines) and cannot reach a chequer patch enclosed between an arm and a coat.
+- ⚠️ **The grid is what separates them.** A chequer alternates on a fixed pitch,
+  fitted from the flood; an enclosed patch is cut only at ≥90% agreement. **No
+  pitch fitted ⇒ only the flood runs**, which is the safe failure.
+- ⚠️ **CLI only, and NOT the UI's `keyOutBackground`.** That one averages the four
+  corners into one colour and floods with a tolerance, client-side on the canvas
+  before upload. Two algorithms, neither calling the other; `POST /api/trace` does
+  **not** expose `--decheck`, because the UI already keys backgrounds itself.
+- ⚠️ Adds **Pillow** to `cli/requirements.txt`. The tracer itself still never
+  opens a pixel — only `--decheck` does.
+
 ## Commands
 
 ```bash
