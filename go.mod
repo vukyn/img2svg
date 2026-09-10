@@ -1,6 +1,6 @@
 module github.com/vukyn/img2svg
 
-go 1.25
+go 1.27.1
 
 require github.com/gofiber/fiber/v2 v2.52.5
 

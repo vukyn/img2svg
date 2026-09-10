@@ -4,7 +4,7 @@
 # assemble a small python runtime image with vtracer installed.
 
 # ── Stage 1: build the React UI → internal/web/dist ──
-FROM node:22-slim AS ui
+FROM node:22-alpine AS ui
 WORKDIR /app
 COPY ui/package.json ui/package-lock.json ./ui/
 RUN cd ui && npm ci
@@ -13,7 +13,7 @@ COPY ui/ ./ui/
 RUN cd ui && npm run build
 
 # ── Stage 2: build the Go server (embeds internal/web/dist) ──
-FROM golang:1.25 AS build
+FROM golang:1.27.1-alpine AS build
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
