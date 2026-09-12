@@ -32,7 +32,11 @@ const proxyHeader = "Fly-Client-IP"
 // itself is unexported, so the number is named here rather than derived — if the
 // ceiling is ever raised above this, the 413 test stops testing anything and
 // fails loudly on the status instead of passing quietly.
-const oversizeSVGBytes = 68 << 20
+//
+// ⚠️ It tracks the ceiling: it was 68 MB while the ceiling was 64, and moved with
+// it to 32. A stale value here is not a wrong test, it is a test that quietly
+// allocates twice what it needs on every run.
+const oversizeSVGBytes = 36 << 20
 
 // --- fixtures -------------------------------------------------------------
 
@@ -401,5 +405,293 @@ touch "`+markerDir+`/finished"`)
 	}
 	if _, err := os.Stat(filepath.Join(markerDir, "finished")); err == nil {
 		t.Fatal("the subprocess ran to completion after its output was refused")
+	}
+}
+
+// --- response headers -----------------------------------------------------
+
+// testApp is the app every header and origin test below drives: a real middleware
+// stack over a CLI stand-in that answers instantly.
+func testApp(t *testing.T) *fiber.App {
+	t.Helper()
+	pythonBin, scriptPath := stubCLI(t, echoingCLI)
+	return newApp(tracer.New(pythonBin, scriptPath, 5*time.Second, 2), proxyHeader)
+}
+
+// TestTracedSVGIsServedAsANonSniffableDownload covers the two headers that decide
+// what a browser is allowed to DO with the response.
+//
+// The body is markup assembled from an upload, served as image/svg+xml. An SVG
+// opened as a top-level document is a scripting context on this origin, so
+// Content-Disposition is what stops the endpoint from being a way to host script
+// under the app's own name; nosniff is what stops the browser re-deciding the type
+// for an SVG whose leading bytes happen to look like something else.
+func TestTracedSVGIsServedAsANonSniffableDownload(t *testing.T) {
+	status, header, body := statusOf(t, testApp(t), newTraceRequest(t, pngHeader(t, 64, 64), "203.0.113.10"))
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", status, body)
+	}
+	if got := header.Get(fiber.HeaderXContentTypeOptions); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := header.Get(fiber.HeaderContentDisposition); got != svgAttachment {
+		t.Fatalf("Content-Disposition = %q, want %q", got, svgAttachment)
+	}
+}
+
+// TestSPAResponsesCarryTheContentSecurityPolicy asserts the policy reaches the
+// document that runs the app, and that it still permits what the app actually
+// loads. Only the header is asserted, not the status: the embedded bundle is a
+// build artifact and a fresh checkout has only a .gitkeep, so a test that required
+// a 200 here would fail for a reason that has nothing to do with the policy.
+func TestSPAResponsesCarryTheContentSecurityPolicy(t *testing.T) {
+	_, header, _ := statusOf(t, testApp(t), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	policy := header.Get(fiber.HeaderContentSecurityPolicy)
+	if policy != contentSecurityPolicy {
+		t.Fatalf("Content-Security-Policy = %q, want %q", policy, contentSecurityPolicy)
+	}
+	// ⚠️ The app's previews — upload thumbnail, compare raster, traced SVG — are
+	// every one of them an object URL, and blob: is not covered by 'self'. A policy
+	// without it loads cleanly and then shows nothing, which is the failure mode a
+	// header-presence check would pass straight through.
+	if !strings.Contains(policy, "img-src 'self' blob:") {
+		t.Fatalf("the policy must allow blob: images or every preview in the app is blocked: %q", policy)
+	}
+	if strings.Contains(policy, "script-src 'self' 'unsafe-inline'") {
+		t.Fatalf("script-src must not allow inline script — the built bundle does not need it: %q", policy)
+	}
+}
+
+// --- cross-site requests --------------------------------------------------
+
+// traceRequestFrom builds a valid trace request carrying the browser-supplied
+// provenance headers under test. An empty value omits the header entirely, which
+// is a distinct case from sending it empty.
+func traceRequestFrom(t *testing.T, secFetchSite, origin string) *http.Request {
+	t.Helper()
+	request := newTraceRequest(t, pngHeader(t, 64, 64), "203.0.113.10")
+	if secFetchSite != "" {
+		request.Header.Set("Sec-Fetch-Site", secFetchSite)
+	}
+	if origin != "" {
+		request.Header.Set(fiber.HeaderOrigin, origin)
+	}
+	return request
+}
+
+// TestCrossSiteProvenanceIsRefused walks every way a request can announce where it
+// came from. multipart/form-data is a CORS-simple content type, so any page
+// anywhere can submit a form at this endpoint with no preflight and no consent —
+// which makes a drive-by the trigger for every resource the tracer's limits bound.
+//
+// The allowed cases are as load-bearing as the refused ones. httptest.NewRequest
+// gives the request Host "example.com", so an Origin naming that host is the
+// app's own page; and the two no-header rows are the deliberate decision that a
+// client sending no provenance at all (curl, CI, a probe) is not a browser and is
+// not what this check defends against.
+func TestCrossSiteProvenanceIsRefused(t *testing.T) {
+	cases := []struct {
+		name         string
+		secFetchSite string
+		origin       string
+		wantRefused  bool
+	}{
+		{name: "fetch metadata says cross-site", secFetchSite: "cross-site", wantRefused: true},
+		{name: "fetch metadata says same-origin", secFetchSite: "same-origin", wantRefused: false},
+		{name: "fetch metadata says same-site", secFetchSite: "same-site", wantRefused: false},
+		{name: "fetch metadata says none (user-initiated)", secFetchSite: "none", wantRefused: false},
+		{
+			// The dev-server shape: Vite proxies with changeOrigin, so Host is
+			// rewritten to the backend and only the browser's own metadata still
+			// tells the truth. Refusing this would break `make web`.
+			name:         "fetch metadata outranks a mismatched Origin",
+			secFetchSite: "same-origin",
+			origin:       "http://localhost:5173",
+			wantRefused:  false,
+		},
+		{name: "origin from another site, no metadata", origin: "https://evil.example", wantRefused: true},
+		{name: "origin is the app's own host", origin: "http://example.com", wantRefused: false},
+		{name: "origin differs only by port", origin: "http://example.com:8443", wantRefused: true},
+		{name: "opaque origin", origin: "null", wantRefused: true},
+		{name: "no provenance headers at all", wantRefused: false},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			status, _, body := statusOf(t, testApp(t), traceRequestFrom(t, testCase.secFetchSite, testCase.origin))
+
+			refused := status == fiber.StatusForbidden
+			if refused != testCase.wantRefused {
+				t.Fatalf("status = %d (refused=%v), want refused=%v (body: %s)",
+					status, refused, testCase.wantRefused, body)
+			}
+			if refused && body != crossSiteMessage {
+				t.Fatalf("body = %q, want the fixed refusal %q", body, crossSiteMessage)
+			}
+			if !refused && status != fiber.StatusOK {
+				t.Fatalf("an allowed request must still be traced, got status %d (body: %s)", status, body)
+			}
+		})
+	}
+}
+
+// TestCrossSiteRefusalDoesNotSpendTheCallersRateBudget pins the mount ORDER, which
+// is the half of this that a reviewer cannot see from the handler. Behind the
+// limiter, a drive-by flood would spend the budget of whatever address it rides —
+// a shared NAT, a corporate egress — and lock out the real callers behind it. The
+// refusal is cheap enough to serve without a budget.
+func TestCrossSiteRefusalDoesNotSpendTheCallersRateBudget(t *testing.T) {
+	app := testApp(t)
+
+	for attempt := 0; attempt <= traceRateLimit; attempt++ {
+		request := newTraceRequest(t, nil, "203.0.113.10")
+		request.Header.Set("Sec-Fetch-Site", "cross-site")
+		if status, _, body := statusOf(t, app, request); status != fiber.StatusForbidden {
+			t.Fatalf("request %d: status = %d, want 403 (body: %s)", attempt, status, body)
+		}
+	}
+
+	request := newTraceRequest(t, pngHeader(t, 64, 64), "203.0.113.10")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	if status, _, body := statusOf(t, app, request); status != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200: the cross-site flood spent this caller's budget, so the origin check runs behind the limiter (body: %s)",
+			status, body)
+	}
+}
+
+// --- interpreter and script paths -----------------------------------------
+
+// fakeExecutable writes a file that looks like an interpreter to the checks.
+func fakeExecutable(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write fake executable: %v", err)
+	}
+	return path
+}
+
+// fakeScript writes a file that looks like the CLI to the checks.
+func fakeScript(t *testing.T, dir, relative string) string {
+	t.Helper()
+	path := filepath.Join(dir, relative)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("make script dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("# stand-in\n"), 0o600); err != nil {
+		t.Fatalf("write fake script: %v", err)
+	}
+	return path
+}
+
+// TestResolveTracerPathsAcceptsAbsolutePaths is the deployment's configuration:
+// both values absolute and both present, taken as given.
+func TestResolveTracerPathsAcceptsAbsolutePaths(t *testing.T) {
+	dir := t.TempDir()
+	interpreter := fakeExecutable(t, dir, "python3")
+	script := fakeScript(t, dir, "img2svg.py")
+
+	python, resolvedScript, err := resolveTracerPaths(interpreter, script, t.TempDir())
+	if err != nil {
+		t.Fatalf("resolveTracerPaths: %v", err)
+	}
+	if python != interpreter {
+		t.Fatalf("interpreter = %q, want %q", python, interpreter)
+	}
+	if resolvedScript != script {
+		t.Fatalf("script = %q, want %q", resolvedScript, script)
+	}
+}
+
+// TestRelativeScriptResolvesAgainstTheBaseDirectory is the fix itself. The script
+// is placed beside the "binary" and nowhere else, so a resolution that consulted
+// anything but baseDir cannot produce this answer.
+func TestRelativeScriptResolvesAgainstTheBaseDirectory(t *testing.T) {
+	baseDir := t.TempDir()
+	want := fakeScript(t, baseDir, filepath.Join("cli", "img2svg.py"))
+
+	_, script, err := resolveTracerPaths("/bin/sh", filepath.Join("cli", "img2svg.py"), baseDir)
+	if err != nil {
+		t.Fatalf("resolveTracerPaths: %v", err)
+	}
+	if script != want {
+		t.Fatalf("script = %q, want %q", script, want)
+	}
+}
+
+// TestRelativeScriptIgnoresTheWorkingDirectory is the vulnerability, stated as a
+// test. A copy of the CLI sits in the working directory and nowhere else; before
+// this change that copy is what the tracer would have executed, for the life of
+// the process, as the server user. Resolving against the binary's own directory
+// means the only outcome now is a refusal at boot.
+func TestRelativeScriptIgnoresTheWorkingDirectory(t *testing.T) {
+	plantedDir := t.TempDir()
+	fakeScript(t, plantedDir, filepath.Join("cli", "img2svg.py"))
+	t.Chdir(plantedDir)
+
+	// An empty base directory: the script exists in the cwd, and only there.
+	_, _, err := resolveTracerPaths("/bin/sh", filepath.Join("cli", "img2svg.py"), t.TempDir())
+	if err == nil {
+		t.Fatal("a relative script path resolved against the working directory: a process started in an attacker-writable directory would load that directory's CLI")
+	}
+	if !strings.Contains(err.Error(), "IMG2SVG_CLI") {
+		t.Fatalf("the failure must name the setting to fix, got %v", err)
+	}
+}
+
+// TestResolveTracerPathsRejectsUnusablePaths covers everything that must stop the
+// process at boot rather than surface later as a 422 on somebody's upload.
+func TestResolveTracerPathsRejectsUnusablePaths(t *testing.T) {
+	dir := t.TempDir()
+	interpreter := fakeExecutable(t, dir, "python3")
+	script := fakeScript(t, dir, "img2svg.py")
+	notExecutable := filepath.Join(dir, "not-executable")
+	if err := os.WriteFile(notExecutable, []byte("plain\n"), 0o600); err != nil {
+		t.Fatalf("write non-executable: %v", err)
+	}
+
+	cases := []struct {
+		name       string
+		pythonBin  string
+		scriptPath string
+		wantNamed  string
+	}{
+		{name: "empty interpreter", pythonBin: "", scriptPath: script, wantNamed: "PYTHON_BIN"},
+		{name: "absolute interpreter missing", pythonBin: filepath.Join(dir, "absent"), scriptPath: script, wantNamed: "PYTHON_BIN"},
+		{name: "interpreter is a directory", pythonBin: dir, scriptPath: script, wantNamed: "PYTHON_BIN"},
+		{name: "interpreter is not executable", pythonBin: notExecutable, scriptPath: script, wantNamed: "PYTHON_BIN"},
+		{name: "bare interpreter not on PATH", pythonBin: "img2svg-no-such-interpreter", scriptPath: script, wantNamed: "PYTHON_BIN"},
+		{name: "absolute script missing", pythonBin: interpreter, scriptPath: filepath.Join(dir, "absent.py"), wantNamed: "IMG2SVG_CLI"},
+		{name: "script is a directory", pythonBin: interpreter, scriptPath: dir, wantNamed: "IMG2SVG_CLI"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, _, err := resolveTracerPaths(testCase.pythonBin, testCase.scriptPath, t.TempDir())
+			if err == nil {
+				t.Fatal("want a boot failure, got none")
+			}
+			if !strings.Contains(err.Error(), testCase.wantNamed) {
+				t.Fatalf("the failure must name %s so the operator knows what to fix, got %v", testCase.wantNamed, err)
+			}
+		})
+	}
+}
+
+// TestBareInterpreterIsResolvedToAnAbsolutePath is what keeps a developer's host
+// working: `python3` is still accepted, but it is looked up once at boot and the
+// absolute result is what every later subprocess runs, so the $PATH that decides
+// which binary executes is fixed at startup rather than re-read per request.
+func TestBareInterpreterIsResolvedToAnAbsolutePath(t *testing.T) {
+	python, _, err := resolveTracerPaths("sh", fakeScript(t, t.TempDir(), "img2svg.py"), t.TempDir())
+	if err != nil {
+		t.Fatalf("resolveTracerPaths: %v", err)
+	}
+	if !filepath.IsAbs(python) {
+		t.Fatalf("interpreter = %q, want an absolute path", python)
+	}
+	if _, err := os.Stat(python); err != nil {
+		t.Fatalf("the resolved interpreter must exist: %v", err)
 	}
 }

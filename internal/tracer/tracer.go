@@ -70,8 +70,11 @@ const (
 	// ⚠️ It is a ceiling on the worst case, not a working-set estimate. A trace at
 	// the ceiling holds the capture here and again in the response body, so the
 	// deployment's memory divided by the concurrency cap is what makes this number
-	// survivable — raising either without the other is what would not be.
-	maxSVGBytes = 64 << 20
+	// survivable — raising either without the other is what would not be. At 32 MB
+	// and two concurrent traces the worst case is 2 × 32 MB × 2 = 128 MB, which a
+	// 512 mb machine carries; the 64 MB this used to be made that 256 MB, which is
+	// half the machine before the interpreters and vtracer are counted.
+	maxSVGBytes = 32 << 20
 )
 
 // Sentinel errors the HTTP layer maps onto status codes. They are returned
@@ -310,6 +313,17 @@ func (t *Tracer) Trace(ctx context.Context, imageBytes []byte, quality string) (
 	defer cancel()
 
 	// pipe mode: "img2svg.py - -q <quality>" reads stdin, writes SVG to stdout
+	//
+	// gosec flags this as G204 and it is a false positive, for reasons that are
+	// each a property some other part of this file maintains rather than an
+	// assertion: it is the argv form, so there is no shell to inject a
+	// metacharacter into; the one caller-supplied argument is quality, refused
+	// above unless it is a key of validQuality; the uploaded file's NAME never
+	// reaches here at all, because the handler passes only the bytes; and
+	// pythonBin/scriptPath are operator configuration that cmd/server resolves to
+	// absolute, existing paths at boot. Changing any of those invalidates the
+	// suppression.
+	// #nosec G204 -- argv form, no shell; quality is allowlisted
 	command := exec.CommandContext(ctx, t.pythonBin, t.scriptPath, "-", "-q", quality)
 	command.Stdin = bytes.NewReader(imageBytes)
 

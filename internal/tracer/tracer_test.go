@@ -506,6 +506,38 @@ sleep 30
 touch "` + markerDir + `/finished"`
 }
 
+// TestOutputCeilingFitsTheDeploymentBudget is the arithmetic the ceiling is only
+// safe because of, written down where a change to it fails.
+//
+// The ceiling is not a number on its own: a trace at it holds the capture in this
+// package AND again in the response body fasthttp copies, and that happens once
+// per concurrent trace. So what has to fit the machine is
+// ceiling × copies × concurrency, and a change to any of the three is a change to
+// all of it — which is exactly the reasoning that is easy to lose when only one of
+// them is being edited.
+//
+// The headroom requirement is half the machine rather than all of it because the
+// other half is not free: two python interpreters, two vtracer working sets, the
+// decoded upload and the Go runtime all live in it.
+func TestOutputCeilingFitsTheDeploymentBudget(t *testing.T) {
+	const (
+		// fly.toml: [[vm]] memory = '512mb'.
+		deploymentBytes = 512 << 20
+		// The capture here, and the response body copied from it.
+		copiesPerTrace = 2
+		// ⚠️ Mirrors maxConcurrentTraces in cmd/server. Deliberately duplicated:
+		// the coupling between the two packages is the thing under test, and a
+		// test that imported the real value would silently follow it upward.
+		deployedConcurrency = 2
+	)
+
+	worstCase := maxSVGBytes * copiesPerTrace * deployedConcurrency
+	if headroom := deploymentBytes / 2; worstCase >= headroom {
+		t.Fatalf("worst case is %d MB (%d MB ceiling × %d copies × %d traces), which leaves under half of the %d MB machine for the interpreters, vtracer and the runtime",
+			worstCase>>20, maxSVGBytes>>20, copiesPerTrace, deployedConcurrency, deploymentBytes>>20)
+	}
+}
+
 // --- ensureViewBox --------------------------------------------------------
 
 // TestEnsureViewBoxOutputIsUnchanged pins the exact bytes for every branch, so a

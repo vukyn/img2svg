@@ -101,7 +101,7 @@ machine down. The numbers live in `cmd/server/main.go` consts and
   `image.DecodeConfig`, which reads the header only, **before** the subprocess
   starts — after it starts, the allocation the check exists to prevent has already
   happened.
-- **Traced SVG ≤ 64 MB** → **413**. ⚠️ The decoded-pixel cap bounds the INPUT and
+- **Traced SVG ≤ 32 MB** → **413**. ⚠️ The decoded-pixel cap bounds the INPUT and
   says nothing about the output: at `faithful` (`filter_speckle=4`,
   `path_precision=6`) a high-entropy image yields roughly a path per speckle, so an
   in-budget upload can expand into an SVG far larger than itself. Enforced by a
@@ -128,8 +128,51 @@ endpoint's availability, so raising it costs more than it looks.
 
 ⚠️ The output ceiling and the concurrency cap are **one number between them**: a
 trace at the ceiling holds the capture and again the response body, so the worst
-case is roughly `2 × 64 MB × concurrency`. Raising either without the other is
-what turns a survivable ceiling into an OOM on a 512 mb machine.
+case is `32 MB × 2 copies × 2 concurrent traces` = **128 MB** of a 512 mb machine.
+Raising either without the other is what turns a survivable ceiling into an OOM.
+The ceiling was 64 MB until it was lowered on exactly this arithmetic — that made
+the same worst case 256 MB, half the machine before the two python interpreters,
+their vtracer working sets and the Go runtime are counted. 32 MB is still a 32×
+margin over the ~1 MB a detailed `faithful` trace actually emits.
+`TestOutputCeilingFitsTheDeploymentBudget` holds the sum, so raising the ceiling
+without raising the machine fails a test rather than a deploy.
+
+### Who is allowed to call it, and what the answer may do
+
+`multipart/form-data` is a **CORS-simple** content type, so any page on the web can
+submit a form at `/api/trace` with no preflight and no consent. Nothing is forged
+— the endpoint is unauthenticated and changes no state — but the machine is spent,
+which makes a drive-by the trigger for every limit above. `rejectCrossSite` refuses
+those with a **403**, ahead of the rate limiter so a flood cannot spend the budget
+of the address it rides in on.
+
+- **`Sec-Fetch-Site` decides when it is present**, because the browser computed it
+  and page script cannot forge it. It is also the only signal that survives a proxy
+  rewriting `Host`, which is what the Vite dev server does (`changeOrigin: true`) —
+  so `make web` keeps working.
+- **`Origin` vs the request's host** is the fallback for a browser old enough to
+  send no fetch metadata. A malformed or `null` Origin is refused.
+- ⚠️ **Neither header present is ALLOWED, deliberately.** The Fetch spec makes
+  `Origin` mandatory on every method but GET/HEAD, so a POST without one did not
+  come from a browser — it is `curl`, CI, or a probe, none of which this check
+  defends against, since they can address the endpoint directly regardless. The
+  rate limiter is what bounds them.
+
+Response headers, set by `securityHeaders` on **every** response (globally, because
+a header a route has to remember is a header a route eventually forgets):
+
+- **`X-Content-Type-Options: nosniff`** — the traced SVG's bytes come from an
+  upload, so the browser must not re-guess its type.
+- **`Content-Security-Policy`** — ⚠️ `img-src` **must** keep `blob:`. Every preview
+  in the UI (upload thumbnail, compare raster, traced SVG) is an object URL, and
+  `blob:` is **not** covered by `'self'`; dropping it leaves an app that loads
+  cleanly and displays nothing. `script-src 'self'` with no nonce is only correct
+  because Vite emits one external module script and no inline script — re-check the
+  built `index.html` if the bundler config changes.
+- **`Content-Disposition: attachment`** on a successful trace — an SVG opened as a
+  top-level document is a scripting context on this origin. Safe to add because the
+  UI reads the endpoint with `fetch()` and renders the bytes itself; nothing ever
+  navigates to it.
 
 ### What a failure is allowed to say
 
@@ -167,7 +210,19 @@ make build      # build-web + bin/server
 
 ## Gotchas
 
-- Requires `python3` + `vtracer` on the host/deploy image. The service fails a trace (422) if the CLI is missing — check `PYTHON_BIN` / `IMG2SVG_CLI` env.
-- `IMG2SVG_CLI` default `cli/img2svg.py` is **relative to the run directory** — run from repo root, or set an absolute path.
+- Requires `python3` + `vtracer` on the host/deploy image. ⚠️ A missing interpreter
+  or CLI is now a **boot failure with a named setting**, not a 422 on somebody's
+  upload — `resolveTracerPaths` in `cmd/server` stats both at startup.
+- ⚠️ **`IMG2SVG_CLI` is no longer resolved against the working directory.** It used
+  to be, which meant a server started from an attacker-writable directory loaded
+  that directory's copy of the CLI (and the script's own `from decheck import …`
+  followed it). A relative value now resolves against **the executable's own
+  directory**; anything else must be absolute. Likewise `PYTHON_BIN`: a bare name is
+  looked up on `$PATH` **once, at boot**, and the absolute result is what every
+  subprocess runs. The Dockerfile sets both absolute
+  (`/usr/local/bin/python3`, `/app/cli/img2svg.py`).
+- Because of that, `make run` / `make dev` export `IMG2SVG_CLI=$(CURDIR)/cli/img2svg.py`
+  — under `go run` the binary lives in a build cache far from the repo, so the path
+  has to be named. Running `./bin/server` by hand needs the same variable.
 - Generated `*.svg` and `bin/` are gitignored.
 - `faithful` output is large (~1MB for detailed art); `small` ~5× smaller.

@@ -5,11 +5,16 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -49,6 +54,51 @@ const (
 	// client, which is how whatever a middleware happened to wrap in reaches an
 	// unauthenticated caller. The detail goes to the log instead.
 	genericErrorMessage = "internal server error"
+
+	// svgAttachment is the Content-Disposition on a successful trace. The body is
+	// attacker-influenced markup served as image/svg+xml, and an SVG opened as a
+	// top-level document is a full scripting context on this origin — same-origin
+	// to the app, its storage and its cookies. Naming the response a download
+	// removes that context. It costs the app nothing: the UI reads this endpoint
+	// with fetch() and renders the bytes itself, so nothing ever navigates to it.
+	svgAttachment = `attachment; filename="trace.svg"`
+
+	// contentSecurityPolicy is the fallback that catches whatever the app's own
+	// escaping misses. It is written against what the bundle actually loads, and
+	// each directive is load-bearing rather than copied:
+	//
+	//   script-src 'self'      — vite emits one external module script and no
+	//                            inline script, so no nonce or hash is needed.
+	//   style-src  'unsafe-inline' — vite links a stylesheet from 'self', but React
+	//                            style props set element.style, which CSP does not
+	//                            govern; the keyword is kept because a future
+	//                            <style> injection is cheap to reintroduce.
+	//   img-src    blob:       — ⚠️ NOT optional. Every preview in the app is an
+	//                            object URL (the upload thumbnail, the compare
+	//                            raster, the traced SVG), and blob: is not covered
+	//                            by 'self'. Without it the app loads and silently
+	//                            shows nothing.
+	//   object-src 'none', base-uri 'self', frame-ancestors 'none' — plugin
+	//                            embedding, <base> hijacking and clickjacking are
+	//                            all things this app never needs.
+	//
+	// data: is deliberately absent: nothing in the bundle uses a data URL, and an
+	// unused allowance is only an allowance for an injection.
+	contentSecurityPolicy = "default-src 'self'; " +
+		"script-src 'self'; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' blob:; " +
+		"connect-src 'self'; " +
+		"object-src 'none'; " +
+		"base-uri 'self'; " +
+		"frame-ancestors 'none'"
+
+	// headerSecFetchSite is the browser's own statement about where a request came
+	// from. Fiber v2 has no constant for it.
+	headerSecFetchSite = "Sec-Fetch-Site"
+
+	// crossSiteMessage is what a request from another site is told.
+	crossSiteMessage = "cross-site requests are not accepted"
 )
 
 func env(key, fallback string) string {
@@ -68,6 +118,152 @@ func env(key, fallback string) string {
 func sanitizedErrorHandler(c *fiber.Ctx, err error) error {
 	log.Printf("unhandled error: %s %s: %v", c.Method(), c.Path(), err)
 	return c.Status(fiber.StatusInternalServerError).SendString(genericErrorMessage)
+}
+
+// securityHeaders puts the headers that are true of every response on every
+// response. Mounted globally rather than on the SPA branch alone, because the
+// trace endpoint wants both of them too and a header a route has to remember to
+// set is a header a route eventually forgets.
+//
+// nosniff is what makes the Content-Type on each response binding. Without it a
+// browser is free to re-guess, and the two responses that matter here are exactly
+// the ones guessing goes wrong on: a traced SVG whose bytes came from an upload,
+// and the bundle's own assets.
+func securityHeaders(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
+	c.Set(fiber.HeaderContentSecurityPolicy, contentSecurityPolicy)
+	return c.Next()
+}
+
+// isCrossSite reports whether a browser told us this request was issued from
+// another site.
+//
+// POST /api/trace takes multipart/form-data, which is a CORS-simple content type:
+// any page anywhere can submit a form at it with no preflight and no consent. The
+// endpoint is unauthenticated and changes no state, so nothing is forged — what is
+// taken is the machine. It is the drive-by trigger for every resource the limits
+// in internal/tracer exist to bound.
+//
+// The order of the two signals is the design.
+//
+//   - Sec-Fetch-Site first, because the browser computed it and page script cannot
+//     set it (a forbidden header name). It is also the only signal that survives a
+//     reverse proxy that rewrites Host, which is exactly what the Vite dev server
+//     does (`changeOrigin: true`), so `make web` keeps working on any browser that
+//     sends it — which is every current one.
+//   - Origin against the request's own host second, for the older browser that
+//     sends no fetch metadata.
+func isCrossSite(c *fiber.Ctx) bool {
+	switch c.Get(headerSecFetchSite) {
+	case "cross-site":
+		return true
+	case "same-origin", "same-site", "none":
+		return false
+	}
+
+	origin := c.Get(fiber.HeaderOrigin)
+	if origin == "" {
+		// ⚠️ Neither header present is ALLOWED, deliberately. A browser cannot get
+		// here: the Fetch spec makes Origin mandatory on every method other than
+		// GET and HEAD, so a POST with no Origin did not come from one. What does
+		// arrive this way is curl, a CI job, a health probe and every server-side
+		// caller — none of which this check defends against, because they can
+		// address the endpoint directly no matter what it answers here. Refusing
+		// them would break every script against a local run and stop nothing; the
+		// rate limiter is what bounds a direct caller.
+		return false
+	}
+
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		// Neither a URL nor the literal "null" (a sandboxed frame or an opaque
+		// redirect) is a same-origin request, and no browser sends either from the
+		// app's own page.
+		return true
+	}
+	return !strings.EqualFold(parsed.Host, c.Hostname())
+}
+
+// rejectCrossSite refuses what isCrossSite recognises.
+//
+// It is mounted ahead of the rate limiter on purpose: a drive-by flood should not
+// spend the budget of the address it is flooding from, which on a shared NAT is a
+// real caller's. The refusal is cheap enough to serve without one.
+func rejectCrossSite(c *fiber.Ctx) error {
+	if isCrossSite(c) {
+		return c.Status(fiber.StatusForbidden).SendString(crossSiteMessage)
+	}
+	return c.Next()
+}
+
+// resolveTracerPaths turns the configured interpreter and CLI script into absolute
+// paths that exist, or explains at boot why it cannot.
+//
+// Both defaults were resolved late and against something the process does not
+// own. A bare "python3" goes through exec.LookPath on every trace, so whoever can
+// place a file earlier in $PATH than the real interpreter runs code as the server
+// user. A relative "cli/img2svg.py" resolves against the working directory, so a
+// process launched from somewhere else loads that directory's script instead — and
+// the script's own `from decheck import decheck` then resolves beside it, so the
+// substitution carries.
+//
+// baseDir is what a relative script path is resolved against — the executable's
+// directory in main, a temp dir in the tests. Never the working directory: that is
+// the input this function exists to stop trusting.
+//
+// Failing here rather than per-request is the other half. A missing interpreter
+// used to surface as a 422 on a trace, indistinguishable from a bad upload.
+func resolveTracerPaths(pythonBin, scriptPath, baseDir string) (string, string, error) {
+	python, err := resolveInterpreter(pythonBin)
+	if err != nil {
+		return "", "", err
+	}
+
+	if !filepath.IsAbs(scriptPath) {
+		scriptPath = filepath.Join(baseDir, scriptPath)
+	}
+	info, err := os.Stat(scriptPath)
+	if err != nil {
+		return "", "", fmt.Errorf("IMG2SVG_CLI: %s: %w (set IMG2SVG_CLI to the absolute path of cli/img2svg.py)", scriptPath, err)
+	}
+	if info.IsDir() {
+		return "", "", fmt.Errorf("IMG2SVG_CLI: %s is a directory, not the CLI script", scriptPath)
+	}
+	return python, scriptPath, nil
+}
+
+// resolveInterpreter absolutises PYTHON_BIN. An absolute value is taken as given
+// and only checked; a bare name is looked up ONCE, here, so the $PATH that decides
+// which binary runs is the one at boot rather than the one at each request.
+//
+// A bare name is still a weaker position than an absolute path, because the lookup
+// itself reads $PATH — which is why the deployment image sets an absolute one. It
+// stays supported because it is what a developer has: `make run` on a host whose
+// python3 lives wherever the version manager put it.
+func resolveInterpreter(pythonBin string) (string, error) {
+	if pythonBin == "" {
+		return "", errors.New("PYTHON_BIN is empty")
+	}
+
+	resolved := pythonBin
+	if !filepath.IsAbs(resolved) {
+		found, err := exec.LookPath(resolved)
+		if err != nil {
+			return "", fmt.Errorf("PYTHON_BIN: %q not found on $PATH: %w (set PYTHON_BIN to an absolute interpreter path)", pythonBin, err)
+		}
+		if resolved, err = filepath.Abs(found); err != nil {
+			return "", fmt.Errorf("PYTHON_BIN: %q: %w", pythonBin, err)
+		}
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("PYTHON_BIN: %s: %w", resolved, err)
+	}
+	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("PYTHON_BIN: %s is not an executable file", resolved)
+	}
+	return resolved, nil
 }
 
 // newApp wires the HTTP surface. It is separate from main so tests can drive the
@@ -94,6 +290,7 @@ func newApp(trace *tracer.Tracer, proxyHeader string) *fiber.App {
 		EnableIPValidation: true,
 	})
 	app.Use(logger.New())
+	app.Use(securityHeaders)
 
 	traceLimiter := limiter.New(limiter.Config{
 		Max:        traceRateLimit,
@@ -105,7 +302,7 @@ func newApp(trace *tracer.Tracer, proxyHeader string) *fiber.App {
 		},
 	})
 
-	app.Post("/api/trace", traceLimiter, func(c *fiber.Ctx) error {
+	app.Post("/api/trace", rejectCrossSite, traceLimiter, func(c *fiber.Ctx) error {
 		quality := c.FormValue("quality", "faithful")
 
 		fileHeader, err := c.FormFile("image")
@@ -142,7 +339,8 @@ func newApp(trace *tracer.Tracer, proxyHeader string) *fiber.App {
 			return c.Status(fiber.StatusUnprocessableEntity).SendString(err.Error())
 		}
 
-		c.Set("Content-Type", "image/svg+xml")
+		c.Set(fiber.HeaderContentType, "image/svg+xml")
+		c.Set(fiber.HeaderContentDisposition, svgAttachment)
 		return c.Send(svg)
 	})
 
@@ -162,6 +360,19 @@ func main() {
 	pythonBin := env("PYTHON_BIN", "python3")
 	scriptPath := env("IMG2SVG_CLI", "cli/img2svg.py")
 	proxyHeader := env("PROXY_HEADER", "")
+
+	// A relative script path is resolved against the binary's own directory, never
+	// the working directory — see resolveTracerPaths. Both Makefile targets that
+	// start the server hand IMG2SVG_CLI an absolute path, so a local run never
+	// depends on where the binary happens to sit.
+	executable, err := os.Executable()
+	if err != nil {
+		log.Fatalf("cannot locate the running executable: %v", err)
+	}
+	pythonBin, scriptPath, err = resolveTracerPaths(pythonBin, scriptPath, filepath.Dir(executable))
+	if err != nil {
+		log.Fatalf("tracer paths: %v", err)
+	}
 
 	trace := tracer.New(pythonBin, scriptPath, traceTimeout, maxConcurrentTraces)
 	app := newApp(trace, proxyHeader)
