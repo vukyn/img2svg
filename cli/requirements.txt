@@ -1,3 +1,17 @@
-vtracer>=0.6
-# --decheck only; the tracer itself never opens a pixel.
-Pillow>=10
+# Floors, not pins. A `>=N` with no minor resolves to the literal N for a scanner
+# reading this file, so each floor names a real release that is actually the
+# oldest one worth installing.
+#
+# ⚠️ This file is NOT what the deployed image installs — the Dockerfile runs
+# `pip install --no-cache-dir vtracer` directly, so Pillow never ships to
+# production and `--decheck` is inert there. These floors are declaration hygiene
+# and the contract for `make cli-deps` on a developer's host, nothing more.
+
+# The tracing engine. 0.6.15 is the newest stable line; the 1.0.0a* releases are
+# pre-releases pip will not pick up without --pre.
+vtracer>=0.6.15
+
+# --decheck only; the tracer itself never opens a pixel. The floor is 12.3.0
+# because every earlier line carries known image-parsing CVEs, and the previous
+# `>=10` declared one of them as acceptable.
+Pillow>=12.3.0

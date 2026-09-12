@@ -1,8 +1,14 @@
 .PHONY: run dev build build-web web deps clean cli-deps
 
 # --- Go service ---
+# The server refuses to resolve a relative CLI path against its working directory
+# (that is the substitution the absolute-path check exists to stop), and under
+# `go run` the binary lives in a build cache far from the repo — so the path the
+# developer means has to be named here. $(CURDIR) is this Makefile's directory.
+CLI_PATH := $(CURDIR)/cli/img2svg.py
+
 run: ## run the HTTP service (serves embedded UI + /api/trace on :8090)
-	go run ./cmd/server
+	IMG2SVG_CLI=$(CLI_PATH) go run ./cmd/server
 
 dev: build-web run ## build the UI then run the service (one-shot local preview)
 
