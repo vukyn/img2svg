@@ -2,7 +2,10 @@ module github.com/vukyn/img2svg
 
 go 1.27.1
 
-require github.com/gofiber/fiber/v2 v2.52.14
+require (
+	github.com/gofiber/fiber/v2 v2.52.14
+	golang.org/x/image v0.46.0
+)
 
 require (
 	github.com/andybalholm/brotli v1.2.1 // indirect
@@ -11,8 +14,10 @@ require (
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
+	github.com/philhofer/fwd v1.1.3-0.20240916144458-20a13a1f6b7c // indirect
 	github.com/rivo/uniseg v0.2.0 // indirect
+	github.com/tinylib/msgp v1.2.5 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.70.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
