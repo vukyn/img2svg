@@ -33,6 +33,12 @@ export default function App() {
 	const [outputState, setOutputState] = useState<OutputState>("empty");
 	const [compareMode, setCompareMode] = useState(false);
 	const [svgText, setSvgText] = useState<string | null>(null);
+	// The traced SVG as an object URL, for <img src>. Every view renders the SVG
+	// through this rather than through svgText, because an <img> is a sandbox: the
+	// document it loads gets no scripting, no event handlers and no access to this
+	// page. svgText stays for the things that want the markup itself — copy,
+	// download and the path/viewBox metrics.
+	const [svgUrl, setSvgUrl] = useState<string | null>(null);
 	const [rasterUrl, setRasterUrl] = useState<string | null>(null);
 	const [metrics, setMetrics] = useState<TraceMetrics | null>(null);
 	const [errorCode, setErrorCode] = useState<string | null>(null);
@@ -47,6 +53,7 @@ export default function App() {
 	// Object URLs are freed on replacement so previews don't leak between picks.
 	const rasterUrlRef = useRef<string | null>(null);
 	const thumbUrlRef = useRef<string | null>(null);
+	const svgUrlRef = useRef<string | null>(null);
 
 	const addLog = useCallback(
 		(msg: string, kind: LogKind = "", indent = false) => {
@@ -69,10 +76,19 @@ export default function App() {
 		}
 	};
 
+	const revokeSvg = () => {
+		if (svgUrlRef.current) {
+			URL.revokeObjectURL(svgUrlRef.current);
+			svgUrlRef.current = null;
+		}
+	};
+
 	const resetOutput = useCallback(() => {
 		setOutputState("empty");
 		setCompareMode(false);
 		setSvgText(null);
+		revokeSvg();
+		setSvgUrl(null);
 		setMetrics(null);
 		setErrorCode(null);
 		revokeRaster();
@@ -174,6 +190,12 @@ export default function App() {
 			rasterUrlRef.current = newRasterUrl;
 			setRasterUrl(newRasterUrl);
 
+			// The SVG as a document of its own, which is what every view loads.
+			revokeSvg();
+			const newSvgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+			svgUrlRef.current = newSvgUrl;
+			setSvgUrl(newSvgUrl);
+
 			setSvgText(svg);
 			setMetrics({
 				name,
@@ -268,6 +290,7 @@ export default function App() {
 	useEffect(
 		() => () => {
 			revokeRaster();
+			revokeSvg();
 			if (thumbUrlRef.current) URL.revokeObjectURL(thumbUrlRef.current);
 		},
 		[],
@@ -336,7 +359,7 @@ export default function App() {
 				<OutputPanel
 					state={outputState}
 					compareMode={compareMode}
-					svgText={svgText}
+					svgUrl={svgUrl}
 					rasterUrl={rasterUrl}
 					metrics={metrics}
 					errorCode={errorCode}
@@ -355,8 +378,8 @@ export default function App() {
 				Vector output scales to any size without blur · powered by python + vtracer.
 			</p>
 
-			{lightboxOpen && svgText && (
-				<Lightbox svgText={svgText} onClose={() => setLightboxOpen(false)} />
+			{lightboxOpen && svgUrl && (
+				<Lightbox svgUrl={svgUrl} onClose={() => setLightboxOpen(false)} />
 			)}
 		</div>
 	);

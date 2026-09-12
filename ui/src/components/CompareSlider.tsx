@@ -4,12 +4,12 @@ import { CompareHandleIcon } from "./Icons";
 
 interface CompareSliderProps {
 	rasterUrl: string; // the prepared source bitmap actually sent to the tracer
-	svgText: string; // the traced SVG markup
+	svgUrl: string; // the traced SVG, as an object URL
 }
 
 // Draggable split view: raster on the left, traced vector on the right, revealed
 // by a vertical handle. The vector layer is clipped to the handle position.
-export function CompareSlider({ rasterUrl, svgText }: CompareSliderProps) {
+export function CompareSlider({ rasterUrl, svgUrl }: CompareSliderProps) {
 	const wrapRef = useRef<HTMLDivElement>(null);
 	const [pct, setPct] = useState(50);
 	const dragging = useRef(false);
@@ -49,11 +49,15 @@ export function CompareSlider({ rasterUrl, svgText }: CompareSliderProps) {
 			<div className="layer raster">
 				<img src={rasterUrl} alt="raster source" />
 			</div>
-			<div
-				className="layer vector"
-				style={{ clipPath: `inset(0 0 0 ${pct}%)` }}
-				dangerouslySetInnerHTML={{ __html: svgText }}
-			/>
+			{/*
+			  * The clip is on this wrapper, never on the SVG itself, so the vector can
+			  * be an <img> like the raster beside it — which is what keeps the traced
+			  * markup out of this document entirely. It also makes the two layers
+			  * measure identically, since `.stage img` in index.css now sizes both.
+			  */}
+			<div className="layer vector" style={{ clipPath: `inset(0 0 0 ${pct}%)` }}>
+				<img src={svgUrl} alt="traced vector output" />
+			</div>
 			<div className="compare-tag l">RASTER</div>
 			<div className="compare-tag r">SVG</div>
 			<div

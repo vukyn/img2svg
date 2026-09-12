@@ -56,6 +56,28 @@ on a fresh checkout).
   handler contract (`POST /api/trace` multipart `image`+`quality` → `image/svg+xml`)
   is unchanged.
 
+⚠️ **The traced SVG is rendered as `<img src={objectURL}>`, never injected as
+markup.** All three views (result layer, compare slider, lightbox) used
+`dangerouslySetInnerHTML` and no longer do. The bytes come out of a subprocess, and
+SVG injected into this DOM runs animation and event handlers — `<animate onbegin>`,
+`<image onerror>` — even though it cannot run a `<script>`, which is what makes the
+risk easy to talk yourself out of. An `<img>` gets none of that.
+
+- It costs the views nothing, which is why `<img>` rather than a sanitiser: the
+  compare clip is on the **wrapper**, the lightbox zoom is a CSS transform on the
+  **wrapper**, and `.stage svg, .stage img` / `.lb-stage svg, .lb-stage img` in
+  `index.css` already size both the same way. Verified in a real browser — the
+  raster and vector layers measure pixel-identical.
+- `App.tsx` owns the object URL's lifetime alongside `rasterUrlRef` / `thumbUrlRef`
+  and revokes it on reset and on unmount. ⚠️ The blob **must** carry
+  `type: "image/svg+xml"` — an untyped blob loads as a download, so the preview
+  goes blank with nothing in the console.
+- ⚠️ `svgText` is still kept, for copy/download/metrics. Rendering from it is the
+  regression; `src/components/svg-rendering.test.tsx` bans the pattern at source
+  level so a fourth view cannot reintroduce it quietly.
+- UI tests run on **vitest + jsdom** (`make test-web` / `npm test` in `ui/`). They
+  are the repo's only frontend tests; there was no runner before them.
+
 **Integration = exec subprocess.** The Go service runs `python3 cli/img2svg.py - -q <quality>` per request, writes the uploaded image bytes to the CLI's **stdin**, and reads the SVG from **stdout**. No temp files, no long-lived python process. Cost: ~python+vtracer startup per call (acceptable for a low-QPS tool). If throughput ever matters, swap `internal/tracer` for an HTTP call to a long-lived python sidecar — the Go handler contract stays the same.
 
 ## CLI modes (`cli/img2svg.py`)
@@ -202,6 +224,7 @@ python or vtracer on the host.
 make cli-deps   # pip install vtracer
 make deps       # go mod tidy
 make build-web  # build the React UI → internal/web/dist (run before go build)
+make test-web   # UI component tests (vitest + jsdom)
 make web        # Vite dev server (HMR) — proxies /api → :8090
 make run        # serve on :8090 (serves the embedded UI)
 make dev        # build-web + run (one-shot local preview)

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CloseIcon, FitIcon, MinusIcon, PlusIcon } from "./Icons";
 
 interface LightboxProps {
-	svgText: string;
+	svgUrl: string; // the traced SVG, as an object URL
 	onClose: () => void;
 }
 
@@ -13,7 +13,7 @@ const clampZoom = (z: number) => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
 
 // Fullscreen viewer for the traced SVG: scroll / +− to zoom, drag to pan, fit to
 // reset, close via ✕ / backdrop / Esc.
-export function Lightbox({ svgText, onClose }: LightboxProps) {
+export function Lightbox({ svgUrl, onClose }: LightboxProps) {
 	const [zoom, setZoom] = useState(1);
 	const pan = useRef({ x: 0, y: 0 });
 	const [, force] = useState(0);
@@ -104,11 +104,16 @@ export function Lightbox({ svgText, onClose }: LightboxProps) {
 					stageRef.current?.classList.add("grabbing");
 				}}
 			>
-				<div
-					className="lb-canvas"
-					style={{ transform }}
-					dangerouslySetInnerHTML={{ __html: svgText }}
-				/>
+				{/*
+				  * Zoom and pan are a CSS transform on this wrapper, not anything inside
+				  * the SVG, so the vector can be an <img> — which keeps the traced markup
+				  * out of this document. A vector loaded this way still scales without
+				  * blur: the browser re-rasterises it at whatever size the transform
+				  * lands on, the same as an inline one.
+				  */}
+				<div className="lb-canvas" style={{ transform }}>
+					<img src={svgUrl} alt="traced vector output" />
+				</div>
 			</div>
 			<div className="lb-hint">scroll or +/− to zoom · drag to pan · Esc to close</div>
 		</div>
