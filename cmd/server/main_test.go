@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"io"
 	"mime/multipart"
@@ -11,6 +12,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +27,12 @@ import (
 // Its production value comes from the PROXY_HEADER env var (fly.toml sets it);
 // the tests name it directly so they exercise the same code path.
 const proxyHeader = "Fly-Client-IP"
+
+// oversizeSVGBytes is comfortably past the tracer's output ceiling. The ceiling
+// itself is unexported, so the number is named here rather than derived — if the
+// ceiling is ever raised above this, the 413 test stops testing anything and
+// fails loudly on the status instead of passing quietly.
+const oversizeSVGBytes = 68 << 20
 
 // --- fixtures -------------------------------------------------------------
 
@@ -264,5 +274,132 @@ func TestMalformedProxyHeaderCollapsesOntoTheSocketAddress(t *testing.T) {
 
 	if lastStatus != fiber.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429: rotating junk through the proxy header bought extra budget, so the header is being trusted without validation", lastStatus)
+	}
+}
+
+// --- what a failed trace tells the client ---------------------------------
+
+// tracebackCLI stands in for the CLI dying on an uncaught python exception: a
+// traceback on stderr naming the absolute script path and the line it died on.
+const tracebackCLI = `printf 'Traceback (most recent call last):\n  File "/srv/img2svg/cli/img2svg.py", line 163, in <module>\n    main()\nException: Failed to decode img_bytes.\n' >&2
+exit 1`
+
+// TestTracebackDoesNotReachTheClient is the disclosure fix end to end. The
+// endpoint is unauthenticated, so before this the response body handed any caller
+// the deploy layout, the python version's internals and a reliable oracle for
+// which limit they had just tripped.
+func TestTracebackDoesNotReachTheClient(t *testing.T) {
+	pythonBin, scriptPath := stubCLI(t, tracebackCLI)
+	app := newApp(tracer.New(pythonBin, scriptPath, 5*time.Second, 2), proxyHeader)
+
+	status, _, body := statusOf(t, app, newTraceRequest(t, pngHeader(t, 64, 64), "203.0.113.10"))
+	if status != fiber.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body: %s)", status, body)
+	}
+	for _, leak := range []string{"Traceback", "/srv/img2svg", "line 163", "img_bytes", "main()"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("the response body carries %q from the subprocess: %q", leak, body)
+		}
+	}
+}
+
+// TestUnrecognizedFormatReachesTheClient is the counterweight, and the thing a
+// blanket suppression would have broken: the one diagnostic that is about the
+// caller's own file, not about the host, must survive.
+func TestUnrecognizedFormatReachesTheClient(t *testing.T) {
+	pythonBin, scriptPath := stubCLI(t, `echo 'unrecognized image format (want png/jpg/gif/bmp/webp)' >&2
+exit 1`)
+	app := newApp(tracer.New(pythonBin, scriptPath, 5*time.Second, 2), proxyHeader)
+
+	status, _, body := statusOf(t, app, newTraceRequest(t, pngHeader(t, 64, 64), "203.0.113.10"))
+	if status != fiber.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body: %s)", status, body)
+	}
+	if !strings.Contains(body, "unrecognized image format") {
+		t.Fatalf("a caller who uploaded a bad file must be told so, got %q", body)
+	}
+}
+
+// TestUnhandledErrorIsNotRelayedToTheClient covers the global ErrorHandler, which
+// had the same shape as the tracer's: err.Error() straight into the response.
+//
+// It is driven through a bare app rather than the real one because the real one
+// has no route that reaches the ErrorHandler — the SPA catch-all answers every
+// unmatched path and the trace handler converts its own errors — which is what
+// makes this a latent leak rather than a reachable one, and why the wiring has to
+// be asserted separately below.
+func TestUnhandledErrorIsNotRelayedToTheClient(t *testing.T) {
+	const secret = "dial tcp 10.0.0.4:5432: connect refused for /srv/img2svg/cli/img2svg.py"
+
+	app := fiber.New(fiber.Config{ErrorHandler: sanitizedErrorHandler})
+	app.Get("/boom", func(c *fiber.Ctx) error { return errors.New(secret) })
+
+	status, _, body := statusOf(t, app, httptest.NewRequest(http.MethodGet, "/boom", nil))
+	if status != fiber.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (body: %s)", status, body)
+	}
+	if body != genericErrorMessage {
+		t.Fatalf("body = %q, want the fixed message %q", body, genericErrorMessage)
+	}
+	for _, leak := range []string{"10.0.0.4", "5432", "/srv/img2svg"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("the response body carries %q from the error: %q", leak, body)
+		}
+	}
+}
+
+// TestNewAppInstallsTheSanitizingErrorHandler is the other half of the test
+// above: sanitizing a handler nothing installs would prove nothing. Compared by
+// code pointer because funcs are not comparable any other way.
+func TestNewAppInstallsTheSanitizingErrorHandler(t *testing.T) {
+	pythonBin, scriptPath := stubCLI(t, echoingCLI)
+	app := newApp(tracer.New(pythonBin, scriptPath, 5*time.Second, 2), proxyHeader)
+
+	installed := reflect.ValueOf(app.Config().ErrorHandler).Pointer()
+	if want := reflect.ValueOf(sanitizedErrorHandler).Pointer(); installed != want {
+		t.Fatal("newApp installs some other ErrorHandler, so the sanitizing one is not what runs")
+	}
+}
+
+// --- the output ceiling over HTTP -----------------------------------------
+
+// TestOversizeSVGIsRejectedWith413 covers the gap the decoded-pixel cap leaves
+// open: that cap bounds the INPUT, and a small high-entropy image at the faithful
+// preset yields roughly a path per speckle, so an in-budget upload can still
+// expand into an unbounded SVG held in the capture, the response body and every
+// copy in between.
+//
+// Waiting on the subprocess is the load-bearing half. The stub sleeps for far
+// longer than the test will wait once it has finished overflowing, so a ceiling
+// that merely NOTICES the overflow — leaving the subprocess running with nobody
+// draining it — fails here even though the status would be right. Past the
+// harness's own 10 s window that shows up as an app.Test timeout rather than as
+// the elapsed assertion below; the assertion is what catches a shorter stall.
+func TestOversizeSVGIsRejectedWith413(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates the output ceiling")
+	}
+
+	markerDir := t.TempDir()
+	pythonBin, scriptPath := stubCLI(t, `head -c `+strconv.Itoa(oversizeSVGBytes)+` /dev/zero | tr '\0' 'x'
+sleep 30
+touch "`+markerDir+`/finished"`)
+	app := newApp(tracer.New(pythonBin, scriptPath, 25*time.Second, 1), proxyHeader)
+
+	start := time.Now()
+	status, _, body := statusOf(t, app, newTraceRequest(t, pngHeader(t, 64, 64), "203.0.113.10"))
+	elapsed := time.Since(start)
+
+	if status != fiber.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (body: %s)", status, body)
+	}
+	if !strings.Contains(body, "bytes of SVG") {
+		t.Fatalf("the 413 body should say what was too big, got %q", body)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("the 413 took %s: the subprocess was left running after the overflow rather than cancelled", elapsed)
+	}
+	if _, err := os.Stat(filepath.Join(markerDir, "finished")); err == nil {
+		t.Fatal("the subprocess ran to completion after its output was refused")
 	}
 }

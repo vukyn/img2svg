@@ -43,6 +43,12 @@ const (
 	// of the machine one caller can ask for.
 	traceRateLimit  = 10
 	traceRateWindow = time.Minute
+
+	// genericErrorMessage is what an unhandled error is allowed to say. Fiber's
+	// default — and the handler this replaced — sends err.Error() straight to the
+	// client, which is how whatever a middleware happened to wrap in reaches an
+	// unauthenticated caller. The detail goes to the log instead.
+	genericErrorMessage = "internal server error"
 )
 
 func env(key, fallback string) string {
@@ -50,6 +56,18 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// sanitizedErrorHandler answers an error that reached the framework. Fiber's
+// default — and the handler this replaced — sends err.Error() to the client, so
+// whatever detail an error happened to be carrying becomes a response body on an
+// unauthenticated endpoint. It goes to the log instead.
+//
+// A named function rather than a closure so a test can assert that this is what
+// newApp installs: a sanitizer nothing installs sanitizes nothing.
+func sanitizedErrorHandler(c *fiber.Ctx, err error) error {
+	log.Printf("unhandled error: %s %s: %v", c.Method(), c.Path(), err)
+	return c.Status(fiber.StatusInternalServerError).SendString(genericErrorMessage)
 }
 
 // newApp wires the HTTP surface. It is separate from main so tests can drive the
@@ -62,7 +80,7 @@ func env(key, fallback string) string {
 func newApp(trace *tracer.Tracer, proxyHeader string) *fiber.App {
 	app := fiber.New(fiber.Config{
 		BodyLimit:    maxImageBytes,
-		ErrorHandler: func(c *fiber.Ctx, err error) error { return c.Status(500).SendString(err.Error()) },
+		ErrorHandler: sanitizedErrorHandler,
 		// ⚠️ These two belong together or not at all, and between them they are what
 		// makes c.IP() — and therefore the rate limiter's bucket key — the actual
 		// caller. Without ProxyHeader, the proxy's own address keys every request
@@ -107,7 +125,9 @@ func newApp(trace *tracer.Tracer, proxyHeader string) *fiber.App {
 
 		svg, err := trace.Trace(c.Context(), imageBytes, quality)
 		switch {
-		case errors.Is(err, tracer.ErrImageTooLarge):
+		case errors.Is(err, tracer.ErrImageTooLarge), errors.Is(err, tracer.ErrOutputTooLarge):
+			// Input too big and output too big are both 413: the request was, in
+			// the end, for more bytes than the endpoint will move.
 			return c.Status(fiber.StatusRequestEntityTooLarge).SendString(err.Error())
 		case errors.Is(err, tracer.ErrBusy):
 			// A slot frees within at most one trace timeout, so that is the honest
@@ -116,6 +136,9 @@ func newApp(trace *tracer.Tracer, proxyHeader string) *fiber.App {
 			return c.Status(fiber.StatusServiceUnavailable).
 				SendString("tracer is busy; retry shortly")
 		case err != nil:
+			// Safe to relay as-is: the tracer sanitises subprocess failures at the
+			// source, so what arrives here is either its own diagnostic or a
+			// content-free sentinel — never the CLI's stderr.
 			return c.Status(fiber.StatusUnprocessableEntity).SendString(err.Error())
 		}
 

@@ -89,7 +89,7 @@ through a filter that could take a white collar off it.
 ## Resource limits on `POST /api/trace`
 
 The endpoint is **unauthenticated** and every call forks a python interpreter plus
-a vtracer run, on a 512 mb scale-to-zero machine. Four limits bound that, and they
+a vtracer run, on a 512 mb scale-to-zero machine. Five limits bound that, and they
 are load-bearing rather than tuning — each closes a way one caller takes the whole
 machine down. The numbers live in `cmd/server/main.go` consts and
 `internal/tracer/tracer.go` consts.
@@ -101,6 +101,15 @@ machine down. The numbers live in `cmd/server/main.go` consts and
   `image.DecodeConfig`, which reads the header only, **before** the subprocess
   starts — after it starts, the allocation the check exists to prevent has already
   happened.
+- **Traced SVG ≤ 64 MB** → **413**. ⚠️ The decoded-pixel cap bounds the INPUT and
+  says nothing about the output: at `faithful` (`filter_speckle=4`,
+  `path_precision=6`) a high-entropy image yields roughly a path per speckle, so an
+  in-budget upload can expand into an SVG far larger than itself. Enforced by a
+  capped `io.Writer` on the subprocess's stdout (`cappedBuffer`), which **refuses
+  the write that would cross the ceiling** and cancels the subprocess's context at
+  that instant — a ceiling that only noticed the overflow afterwards would mean the
+  bytes were already generated and already in memory. Detailed art traces to about
+  a megabyte, so only an adversarial input gets near this.
 - **≤ 2 concurrent traces** → **503 + `Retry-After`**. Deliberately a refusal, not
   a queue: a queue in front of a subprocess this expensive does not prevent the
   overload, it converts one caller's rejection into everybody's timeout.
@@ -116,6 +125,29 @@ already the truth.
 
 Subprocess timeout is **20 s**. With only two slots, slot hold time *is* the
 endpoint's availability, so raising it costs more than it looks.
+
+⚠️ The output ceiling and the concurrency cap are **one number between them**: a
+trace at the ceiling holds the capture and again the response body, so the worst
+case is roughly `2 × 64 MB × concurrency`. Raising either without the other is
+what turns a survivable ceiling into an OOM on a 512 mb machine.
+
+### What a failure is allowed to say
+
+`Trace` **never returns the CLI's stderr**, and the global `ErrorHandler` never
+returns `err.Error()`. A python traceback carries absolute host paths, source line
+numbers and interpreter internals, and this endpoint hands its response body to
+anyone — it is also a clean oracle for which of the limits above a prober just
+tripped. The detail is `log.Printf`-ed server-side; the caller gets a sentinel
+(`ErrTraceFailed` → 422, `genericErrorMessage` → 500).
+
+⚠️ The one exception is **`unrecognized image format`**, relayed as
+`ErrUnsupportedFormat`: it is about the bytes the caller uploaded, discloses
+nothing about the host, and is the difference between a user fixing their file and
+retrying a bad one forever. It is matched on an **allowlist** of that one marker
+in stderr — never a blocklist of leaky shapes, because a rule built from the shapes
+somebody thought of still relays the next one nobody did, and the CLI has other
+`sys.exit` paths that quote host paths. ⚠️ The marker text must stay in step with
+`cli/img2svg.py`, the same way the quality presets do.
 
 `cmd/server/main_test.go` and `internal/tracer/tracer_test.go` cover all of the
 above; both suites use a shell-script stand-in for the CLI, so they run without
