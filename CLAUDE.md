@@ -86,6 +86,41 @@ through a filter that could take a white collar off it.
 - ⚠️ Adds **Pillow** to `cli/requirements.txt`. The tracer itself still never
   opens a pixel — only `--decheck` does.
 
+## Resource limits on `POST /api/trace`
+
+The endpoint is **unauthenticated** and every call forks a python interpreter plus
+a vtracer run, on a 512 mb scale-to-zero machine. Four limits bound that, and they
+are load-bearing rather than tuning — each closes a way one caller takes the whole
+machine down. The numbers live in `cmd/server/main.go` consts and
+`internal/tracer/tracer.go` consts.
+
+- **Encoded body ≤ 20 MB** (`fiber.Config.BodyLimit` + the `io.LimitReader`).
+- **Decoded pixels ≤ 40 M, and ≤ 10 000 px on a side** → **413**. ⚠️ The body limit
+  does not imply this one: a flat-colour PNG of a few hundred kilobytes decodes to
+  gigabytes of RGBA, so encoded size is no evidence about decoded size. Checked via
+  `image.DecodeConfig`, which reads the header only, **before** the subprocess
+  starts — after it starts, the allocation the check exists to prevent has already
+  happened.
+- **≤ 2 concurrent traces** → **503 + `Retry-After`**. Deliberately a refusal, not
+  a queue: a queue in front of a subprocess this expensive does not prevent the
+  overload, it converts one caller's rejection into everybody's timeout.
+- **10 requests/minute per caller** (Fiber's `limiter`) → **429**.
+
+⚠️ The rate limit depends on `fiber.Config`'s **`ProxyHeader` + `EnableIPValidation`
+together**. `PROXY_HEADER` (set to `Fly-Client-IP` in `fly.toml`) is what makes
+`c.IP()` the real caller — without it every request carries fly-proxy's address and
+the per-IP budget becomes one global bucket. Without the validation flag Fiber
+returns the header verbatim, so junk rotated through it mints unlimited fresh
+budgets. Leave `PROXY_HEADER` unset for a local run, where the socket address is
+already the truth.
+
+Subprocess timeout is **20 s**. With only two slots, slot hold time *is* the
+endpoint's availability, so raising it costs more than it looks.
+
+`cmd/server/main_test.go` and `internal/tracer/tracer_test.go` cover all of the
+above; both suites use a shell-script stand-in for the CLI, so they run without
+python or vtracer on the host.
+
 ## Commands
 
 ```bash

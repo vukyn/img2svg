@@ -4,22 +4,46 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
+	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 
 	"github.com/vukyn/img2svg/internal/tracer"
 	"github.com/vukyn/img2svg/internal/web"
 )
 
-// max upload size for an input image
-const maxImageBytes = 20 * 1024 * 1024
+const (
+	// max upload size for an input image. This bounds the ENCODED bytes only;
+	// the decoded pixel count is bounded separately, inside the tracer.
+	maxImageBytes = 20 * 1024 * 1024
+
+	// maxConcurrentTraces bounds how many python+vtracer subprocesses run at once.
+	// Sized for the deployment's single shared vCPU (see fly.toml): a trace is
+	// CPU-bound, so more of them in parallel makes every one slower without
+	// finishing any sooner, and each carries its own interpreter's memory.
+	maxConcurrentTraces = 2
+
+	// traceTimeout caps a single subprocess. Long enough for a large image on a
+	// shared vCPU, short enough that a stuck trace releases its slot promptly —
+	// with only a couple of slots, slot hold time is what the endpoint's
+	// availability is made of.
+	traceTimeout = 20 * time.Second
+
+	// Per-caller budget on the trace endpoint. The endpoint is unauthenticated and
+	// every call forks a subprocess, so the limiter is the outer bound on how much
+	// of the machine one caller can ask for.
+	traceRateLimit  = 10
+	traceRateWindow = time.Minute
+)
 
 func env(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
@@ -28,20 +52,42 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func main() {
-	port := env("PORT", "8090")
-	pythonBin := env("PYTHON_BIN", "python3")
-	scriptPath := env("IMG2SVG_CLI", "cli/img2svg.py")
-
-	trace := tracer.New(pythonBin, scriptPath, 60*time.Second)
-
+// newApp wires the HTTP surface. It is separate from main so tests can drive the
+// real middleware stack (limiter, body limit, error mapping) against a tracer of
+// their choosing.
+//
+// proxyHeader is the header a fronting proxy puts the real client address in
+// ("Fly-Client-IP" on fly.io); empty for a direct run, where the socket's remote
+// address is the truth.
+func newApp(trace *tracer.Tracer, proxyHeader string) *fiber.App {
 	app := fiber.New(fiber.Config{
 		BodyLimit:    maxImageBytes,
 		ErrorHandler: func(c *fiber.Ctx, err error) error { return c.Status(500).SendString(err.Error()) },
+		// ⚠️ These two belong together or not at all, and between them they are what
+		// makes c.IP() — and therefore the rate limiter's bucket key — the actual
+		// caller. Without ProxyHeader, the proxy's own address keys every request
+		// and the per-IP limit becomes one global bucket that any single sprayer
+		// spends for everyone. Without EnableIPValidation, Fiber returns the header
+		// verbatim with no fallback, so an absent header yields an empty key (one
+		// shared bucket again) and rotating junk through the header would mint
+		// unlimited fresh budgets. With the flag, absent or malformed falls back to
+		// the socket's remote address.
+		ProxyHeader:        proxyHeader,
+		EnableIPValidation: true,
 	})
 	app.Use(logger.New())
 
-	app.Post("/api/trace", func(c *fiber.Ctx) error {
+	traceLimiter := limiter.New(limiter.Config{
+		Max:        traceRateLimit,
+		Expiration: traceRateWindow,
+		LimitReached: func(c *fiber.Ctx) error {
+			// The limiter has already set Retry-After to the window remainder.
+			return c.Status(fiber.StatusTooManyRequests).
+				SendString("too many trace requests; try again shortly")
+		},
+	})
+
+	app.Post("/api/trace", traceLimiter, func(c *fiber.Ctx) error {
 		quality := c.FormValue("quality", "faithful")
 
 		fileHeader, err := c.FormFile("image")
@@ -60,7 +106,16 @@ func main() {
 		}
 
 		svg, err := trace.Trace(c.Context(), imageBytes, quality)
-		if err != nil {
+		switch {
+		case errors.Is(err, tracer.ErrImageTooLarge):
+			return c.Status(fiber.StatusRequestEntityTooLarge).SendString(err.Error())
+		case errors.Is(err, tracer.ErrBusy):
+			// A slot frees within at most one trace timeout, so that is the honest
+			// hint. Turning the caller away beats queueing them behind a subprocess.
+			c.Set(fiber.HeaderRetryAfter, strconv.Itoa(int(trace.Timeout().Seconds())))
+			return c.Status(fiber.StatusServiceUnavailable).
+				SendString("tracer is busy; retry shortly")
+		case err != nil:
 			return c.Status(fiber.StatusUnprocessableEntity).SendString(err.Error())
 		}
 
@@ -75,6 +130,25 @@ func main() {
 		Index:        "index.html",
 		NotFoundFile: "index.html",
 	}))
+
+	return app
+}
+
+func main() {
+	port := env("PORT", "8090")
+	pythonBin := env("PYTHON_BIN", "python3")
+	scriptPath := env("IMG2SVG_CLI", "cli/img2svg.py")
+	proxyHeader := env("PROXY_HEADER", "")
+
+	trace := tracer.New(pythonBin, scriptPath, traceTimeout, maxConcurrentTraces)
+	app := newApp(trace, proxyHeader)
+
+	// Deploying behind a proxy without naming its client-address header is a silent
+	// mis-binding: it looks fine, and the per-IP rate limit quietly becomes global.
+	// Say so at boot rather than leaving it to be found by a lockout.
+	if proxyHeader == "" {
+		log.Print("PROXY_HEADER is unset: rate-limit buckets are keyed by the socket address, which is the fronting proxy's if there is one")
+	}
 
 	log.Printf("img2svg listening on :%s (python=%s cli=%s)", port, pythonBin, scriptPath)
 	log.Fatal(app.Listen(":" + port))
