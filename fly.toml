@@ -11,6 +11,11 @@ primary_region = 'sin'
 
 [env]
   PORT = '8090'
+  # The header fly-proxy puts the real client address in. Without it every request
+  # reaching the app carries the proxy's address, so the per-IP rate limit on
+  # /api/trace collapses into a single global bucket. Unset for a local or direct
+  # run, where the socket address is already the truth.
+  PROXY_HEADER = 'Fly-Client-IP'
 
 [http_service]
   internal_port = 8090
