@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -20,5 +21,13 @@ export default defineConfig({
 				changeOrigin: true,
 			},
 		},
+	},
+	// Component tests run in jsdom against the real React renderer. Excluding the
+	// build output matters: internal/web/dist is the embedded bundle and picking a
+	// file out of it would run the shipped code rather than the source.
+	test: {
+		environment: "jsdom",
+		include: ["src/**/*.test.{ts,tsx}"],
+		exclude: ["node_modules", "dist", "../internal/web/dist"],
 	},
 });

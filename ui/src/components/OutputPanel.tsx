@@ -18,7 +18,9 @@ import {
 interface OutputPanelProps {
 	state: OutputState;
 	compareMode: boolean;
-	svgText: string | null;
+	// The traced SVG as an object URL, loaded through <img> rather than injected as
+	// markup — see the result layer below.
+	svgUrl: string | null;
 	rasterUrl: string | null;
 	metrics: TraceMetrics | null;
 	errorCode: string | null;
@@ -35,7 +37,7 @@ interface OutputPanelProps {
 export function OutputPanel({
 	state,
 	compareMode,
-	svgText,
+	svgUrl,
 	rasterUrl,
 	metrics,
 	errorCode,
@@ -81,15 +83,25 @@ export function OutputPanel({
 			</div>
 			<div className="panel-body">
 				<div className="stage checker">
-					{hasOutput && !compareMode && svgText && (
-						<div
-							className="result-layer"
-							dangerouslySetInnerHTML={{ __html: svgText }}
-						/>
+					{/*
+					  * Loaded as a document, not injected as markup. The bytes come out of
+					  * a subprocess, and SVG injected into this DOM runs animation and
+					  * event handlers (<animate onbegin>, <image onerror>) even though it
+					  * cannot run a <script>. An <img> gets none of that: no scripting, no
+					  * handlers, no reach into this page.
+					  *
+					  * Nothing is lost by it here. The layer is a plain flex box that
+					  * centres whatever is inside, and `.stage svg, .stage img` in index.css
+					  * already sizes both the same way.
+					  */}
+					{hasOutput && !compareMode && svgUrl && (
+						<div className="result-layer">
+							<img src={svgUrl} alt="traced vector output" />
+						</div>
 					)}
 
-					{hasOutput && compareMode && svgText && rasterUrl && (
-						<CompareSlider rasterUrl={rasterUrl} svgText={svgText} />
+					{hasOutput && compareMode && svgUrl && rasterUrl && (
+						<CompareSlider rasterUrl={rasterUrl} svgUrl={svgUrl} />
 					)}
 
 					{hasOutput && (

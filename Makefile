@@ -1,4 +1,4 @@
-.PHONY: run dev build build-web web deps clean cli-deps
+.PHONY: run dev build build-web test-web web deps clean cli-deps
 
 # --- Go service ---
 # The server refuses to resolve a relative CLI path against its working directory
@@ -25,6 +25,9 @@ web: ## Vite dev server in ui/ (proxies /api → :8090)
 build-web: ## build the UI into internal/web/dist (must run before `go build`)
 	cd ui && npm install && npm run build
 	touch internal/web/dist/.gitkeep
+
+test-web: ## run the UI component tests (vitest + jsdom)
+	cd ui && npm test
 
 # --- python CLI ---
 cli-deps: ## install python CLI deps (vtracer, Pillow for --decheck)
