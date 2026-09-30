@@ -75,7 +75,7 @@ risk easy to talk yourself out of. An `<img>` gets none of that.
 - ⚠️ `svgText` is still kept, for copy/download/metrics. Rendering from it is the
   regression; `src/components/svg-rendering.test.tsx` bans the pattern at source
   level so a fourth view cannot reintroduce it quietly.
-- UI tests run on **vitest + jsdom** (`make test-web` / `npm test` in `ui/`). They
+- UI tests run on **vitest + jsdom** (`make test-web` / `pnpm test` in `ui/`). They
   are the repo's only frontend tests; there was no runner before them.
 
 **Integration = exec subprocess.** The Go service runs `python3 cli/img2svg.py - -q <quality>` per request, writes the uploaded image bytes to the CLI's **stdin**, and reads the SVG from **stdout**. No temp files, no long-lived python process. Cost: ~python+vtracer startup per call (acceptable for a low-QPS tool). If throughput ever matters, swap `internal/tracer` for an HTTP call to a long-lived python sidecar — the Go handler contract stays the same.

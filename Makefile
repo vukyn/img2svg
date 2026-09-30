@@ -20,14 +20,14 @@ deps: ## tidy go modules
 
 # --- React UI (Vite + React 19 + TS) ---
 web: ## Vite dev server in ui/ (proxies /api → :8090)
-	cd ui && npm run dev
+	cd ui && pnpm run dev
 
 build-web: ## build the UI into internal/web/dist (must run before `go build`)
-	cd ui && npm install && npm run build
+	cd ui && pnpm install --frozen-lockfile && pnpm run build
 	touch internal/web/dist/.gitkeep
 
 test-web: ## run the UI component tests (vitest + jsdom)
-	cd ui && npm test
+	cd ui && pnpm test
 
 # --- python CLI ---
 cli-deps: ## install python CLI deps (vtracer, Pillow for --decheck)

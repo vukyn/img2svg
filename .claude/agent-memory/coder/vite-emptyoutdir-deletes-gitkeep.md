@@ -1,6 +1,6 @@
 ---
 name: vite-emptyoutdir-deletes-gitkeep
-description: `npm run build` in ui/ wipes the tracked .gitkeep that keeps go:embed valid — always `make build-web`, never bare vite build
+description: `pnpm run build` in ui/ wipes the tracked .gitkeep that keeps go:embed valid — always `make build-web`, never bare vite build
 metadata:
   type: feedback
 ---
@@ -10,7 +10,7 @@ built bundle is gitignored except a committed `internal/web/dist/.gitkeep`, whic
 is what keeps the `//go:embed all:dist` directive compiling on a fresh checkout.
 Vite's `build.emptyOutDir: true` **deletes that placeholder** on every build.
 
-**Why:** running the documented-looking gate `cd ui && npm run build` leaves
+**Why:** running the documented-looking gate `cd ui && npm run build` (now `pnpm run build`) leaves
 `git status` showing ` D internal/web/dist/.gitkeep` and turns
 `go test ./internal/web/...` red with
 `embed root must contain the dist placeholder: open .gitkeep: file does not exist`
@@ -20,8 +20,8 @@ checkout for everyone. Hit on img2svg 2026-09-13; the repo's `Makefile` already
 carried the fix (`build-web` runs `touch internal/web/dist/.gitkeep` after vite)
 so the bug only appears when the Makefile is bypassed.
 
-**How to apply:** use `make build-web`, never bare `npm run build`, whenever the
+**How to apply:** use `make build-web`, never bare `pnpm run build`, whenever the
 Go build or `go test ./internal/web/...` follows. If a task hands you
-`cd ui && npm run build` as the gate, run the make target instead and say why.
+`cd ui && pnpm run build` as the gate, run the make target instead and say why.
 After any UI build, check `git status internal/web/` before staging — and stage
 explicit paths regardless ([[stage-explicit-paths-parallel-sessions]]).

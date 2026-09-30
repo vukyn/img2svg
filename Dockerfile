@@ -6,11 +6,13 @@
 # ── Stage 1: build the React UI → internal/web/dist ──
 FROM node:22-alpine AS ui
 WORKDIR /app
-COPY ui/package.json ui/package-lock.json ./ui/
-RUN cd ui && npm ci
+# pnpm via corepack (version pinned by "packageManager" in ui/package.json)
+RUN corepack enable
+COPY ui/package.json ui/pnpm-lock.yaml ./ui/
+RUN cd ui && pnpm install --frozen-lockfile
 COPY ui/ ./ui/
 # vite outDir is ../internal/web/dist (relative to ui/)
-RUN cd ui && npm run build
+RUN cd ui && pnpm run build
 
 # ── Stage 2: build the Go server (embeds internal/web/dist) ──
 FROM golang:1.27.1-alpine AS build
