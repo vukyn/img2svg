@@ -8,7 +8,7 @@ FROM node:22-alpine AS ui
 WORKDIR /app
 # pnpm via corepack (version pinned by "packageManager" in ui/package.json)
 RUN corepack enable
-COPY ui/package.json ui/pnpm-lock.yaml ./ui/
+COPY ui/package.json ui/pnpm-lock.yaml ui/pnpm-workspace.yaml ./ui/
 RUN cd ui && pnpm install --frozen-lockfile
 COPY ui/ ./ui/
 # vite outDir is ../internal/web/dist (relative to ui/)
