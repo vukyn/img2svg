@@ -9,4 +9,4 @@ One line per memory: link + hook only. Detail lives in the topic file.
 - [exec Write error ≠ dead child](exec-write-error-does-not-kill-child.md) — capping Cmd.Stdout detects the overflow but never stops the subprocess; cancel the context, and TIME the test
 
 ## Build traps
-- [vite emptyOutDir eats .gitkeep](vite-emptyoutdir-deletes-gitkeep.md) — bare `npm run build` reds `go test ./internal/web`; always `make build-web`
+- [vite emptyOutDir eats .gitkeep](vite-emptyoutdir-deletes-gitkeep.md) — bare `pnpm run build` reds `go test ./internal/web`; always `make build-web`
