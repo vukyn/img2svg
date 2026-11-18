@@ -15,7 +15,7 @@ COPY ui/ ./ui/
 RUN cd ui && pnpm run build
 
 # ── Stage 2: build the Go server (embeds internal/web/dist) ──
-FROM golang:1.27.1-alpine AS build
+FROM golang:1.27.4-alpine AS build
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
